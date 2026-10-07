@@ -232,7 +232,7 @@ A BIP-110 node decodes it.
 | Software | strfry. NIP-11: max message 524 288 bytes, max subscriptions 200, max limit 500. |
 | Authentication | none needed to read or write (NIP-42 is advertised but not required). |
 | Write policy | spam filters plus a per-pubkey daily event limit. Because a pool channel is one pubkey, kinds 2023/32022 must be exempt for pools beyond a handful of people (being checked). |
-| Retention | no expiry is set on Kilojoin events and the relay does not prune them on a schedule; a pool's history is what a reconnecting member replays. |
+| Retention | Kilojoin sets no NIP-40 expiration; a pool's history on the relay is what a reconnecting member replays, so it must be kept at least as long as a pool lives. |
 | Tor | no onion address yet. Clients can reach it through Tor as a clearnet relay. |
 | Client behaviour (ours) | ping after 60 s of silence; reconnect after 120 s; on reconnect, re-subscribe to `#p:[join pub]` and `#p:[pool pub]` with no `since`, and replay. |
 
