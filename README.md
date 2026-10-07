@@ -17,6 +17,10 @@ Coinjoin on BTC (the BLAKE2b chain) from your own node, in the same pools as the
 On StartOS, install it from the Kilombino Registry (package `kilojoin`, wrapper at
 [kilojoin-startos](https://github.com/Kilombino/kilojoin-startos)).
 
+## Protocol
+
+[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1 for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
+
 ## Build and run
 
 ```sh
