@@ -1,0 +1,9 @@
+build
+.gradle
+*.log
+kilowallet/app/build
+kilowallet/.gradle
+kilowallet/build
+kilowallet/app/src/main/res
+kilowallet/fastlane
+kilowallet/tools
