@@ -45,6 +45,10 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
 
     /** A fresh address on [branch] (0 receive, 1 change), reserved so nothing else gets it. */
     @Synchronized
+    /** The change script a send would use next, without reserving it (for a preview). */
+    fun nextChangeScript(): ByteArray = script(1, top(1))
+
+    @Synchronized
     fun fresh(branch: Int): Pair<Int, ByteArray> {
         val i = top(branch); bump(branch, i + 1)
         return i to script(branch, i)

@@ -51,6 +51,12 @@ class Rpc(private val url: String, private val user: String?, private val pass: 
         maxOf(1.0, r.getDouble("feerate") * 100_000.0)
     }.getOrDefault(2.0)
 
+    /** The node's estimate in sat/vB for the next [blocks], or null when it has none (a quiet mempool). */
+    fun feeEstimate(blocks: Int = 3): Double? = runCatching {
+        val r = call("estimatesmartfee", blocks) as JSONObject
+        if (r.has("feerate")) r.getDouble("feerate") * 100_000.0 else null
+    }.getOrNull()
+
     /** The output, or null when it is spent or unknown (mempool included). */
     fun txOut(txid: String, vout: Int): JSONObject? = call("gettxout", txid, vout, true) as? JSONObject
 }

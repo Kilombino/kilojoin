@@ -5,6 +5,7 @@ import com.kilombino.pyblockwatch.coinjoin.PoolSession
 import com.kilombino.pyblockwatch.coinjoin.Protocol
 import com.kilombino.pyblockwatch.coinjoin.RelayClient
 import com.kilombino.pyblockwatch.crypto.Bip32Priv
+import com.kilombino.pyblockwatch.crypto.Hashes.toHex
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -36,6 +37,30 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun settings(): JSONObject = if (settingsFile.exists()) JSONObject(settingsFile.readText()) else JSONObject()
     fun setSetting(k: String, v: Any) { val o = settings(); o.put(k, v); settingsFile.writeText(o.toString()) }
     val notifyNewPools: Boolean get() = settings().optBoolean("notify_new_pools", true)
+
+    /**
+     * Scripts of this wallet's mixed outputs (hex), kept in settings so a coin stays marked
+     * "mixed" after its round is removed from the list. Spending one together with unmixed
+     * coins would tie them back together, so the wallet warns about it.
+     */
+    @Synchronized
+    fun mixedScripts(): Set<String> {
+        val a = settings().optJSONArray("mixed_scripts") ?: JSONArray()
+        val saved = (0 until a.length()).map { a.getString(it) }
+        val live = sessions.values.map { it.state }
+            .filter { it.phase == PoolSession.Phase.BROADCAST || it.phase == PoolSession.Phase.CONFIRMED }
+            .map { it.mixScript.toHex() }
+        return (saved + live).toSet()
+    }
+
+    @Synchronized
+    private fun rememberMixed(scriptHex: String) {
+        val all = mixedScripts() + scriptHex
+        setSetting("mixed_scripts", JSONArray(all.toList()))
+    }
+
+    /** Rescan the wallet off the caller's thread (after a round goes out or confirms). */
+    private fun rescanSoon() { Thread { runCatching { walletProvider()?.scan() } }.start() }
 
     // ------------------------------------------------------------------ persistence
 
@@ -168,8 +193,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 is PoolSession.Event.CloseRefused -> emit("Coinjoin: stays open", "$pool · someone said not yet", st.poolId)
                 is PoolSession.Event.Closing -> emit("Coinjoin: closing", "$pool · ${e.peers} people", st.poolId)
                 is PoolSession.Event.SignNeeded -> emit("Coinjoin: sign now", "$pool · the transaction is ready to sign", st.poolId)
-                is PoolSession.Event.Broadcast -> emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId)
-                is PoolSession.Event.Confirmed -> emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId)
+                is PoolSession.Event.Broadcast -> { rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScript.toHex()); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Aborted -> emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId)
             }
         }

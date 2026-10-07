@@ -37,7 +37,13 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         server.createContext("/") { ex -> runCatching { route(ex) }.onFailure { e -> reply(ex, 500, err(e.message ?: "error")) } }
     }
 
-    fun start() { server.start(); Thread { runCatching { wallet?.scan() } }.start() }
+    fun start() {
+        server.start()
+        Thread { runCatching { wallet?.scan() } }.start()
+        // Keep the balance current without a click: every 10 minutes (the UTXO scan is cheap).
+        Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(
+            { runCatching { wallet?.scan() } }, 10, 10, java.util.concurrent.TimeUnit.MINUTES)
+    }
     val events get() = engine.events
     fun onEvent(f: (Engine.Event) -> Unit) { engine.onEvent = f }
 
@@ -113,6 +119,17 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                 engine.join(s!!, w, c, t, b.optString("password"))
                 reply(ex, 200, ok())
             }
+            "/api/fee" -> reply(ex, 200, JSONObject().put("suggested", rpc.feeEstimate() ?: JSONObject.NULL))
+            "/api/send/preview" -> { val (d, warn) = draft(w!!, b); reply(ex, 200, draftJson(d, warn)) }
+            "/api/send" -> {
+                val (d, warn) = draft(w!!, b)
+                require(warn == null || b.optBoolean("acceptWarning")) { warn!! }
+                val change = if (d.change > 0) w.fresh(1).second else w.nextChangeScript()
+                val signed = Spend.sign(s!!, d, change)
+                val txid = rpc.call("sendrawtransaction", signed.rawHex) as String
+                Thread { runCatching { Thread.sleep(3000); w.scan() } }.start()
+                reply(ex, 200, JSONObject().put("txid", txid))
+            }
             "/api/close" -> { engine.session(b.getString("pool"))!!.requestClose(); reply(ex, 200, ok()) }
             "/api/vote" -> { engine.session(b.getString("pool"))!!.vote(b.getBoolean("accept")); reply(ex, 200, ok()) }
             "/api/sign" -> { engine.sign(s!!, b.getString("pool")); reply(ex, 200, ok()) }
@@ -121,6 +138,35 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             else -> reply(ex, 404, err("not found"))
         }
     }
+
+    /**
+     * The send asked for in [b] (coins, address, amount or all, fee rate), and a warning when it
+     * would undo a mix: a mixed coin spent with any other coin ties them together again.
+     */
+    private fun draft(w: Wallet, b: JSONObject): Pair<Spend.Draft, String?> {
+        val picked = b.getJSONArray("coins").let { a -> (0 until a.length()).map { a.getString(it) } }
+        val locked = engine.lockedOutpoints()
+        val coins = picked.map { op ->
+            require(op !in locked) { "A ticked coin is in a coinjoin round right now." }
+            w.coins.firstOrNull { it.outpoint == op } ?: error("A ticked coin is gone: scan again.")
+        }
+        val amount = b.optLong("amount", 0L).takeIf { it > 0 }
+        val d = Spend.plan(coins, b.getString("address"), amount, b.getDouble("feeRate"), w.nextChangeScript())
+        val mixed = engine.mixedScripts()
+        val nMixed = coins.count { w.script(it.branch, it.index).toHex() in mixed }
+        val warn = when {
+            nMixed > 0 && coins.size > nMixed -> "You are spending mixed and unmixed coins together: anyone can link them again, which undoes the coinjoin."
+            nMixed > 1 -> "You are spending several mixed coins together: they become linked to each other."
+            nMixed > 0 && d.change > 0 -> "Spending part of a mixed coin leaves change that is tied to this payment."
+            else -> null
+        }
+        return d to warn
+    }
+
+    private fun draftJson(d: Spend.Draft, warn: String?) = JSONObject()
+        .put("address", d.toAddress).put("amount", d.amount).put("change", d.change).put("fee", d.fee)
+        .put("vbytes", d.vbytes).put("feeRate", d.feeRate).put("inputs", d.coins.size)
+        .put("total", d.coins.sumOf { it.value }).put("warning", warn ?: JSONObject.NULL)
 
     private fun coin(w: Wallet, outpoint: String): Wallet.Coin {
         require(outpoint !in engine.lockedOutpoints()) { "that coin is already in a round" }
@@ -182,9 +228,11 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             .put("height", runCatching { rpc.height() }.getOrDefault(0))
             .put("relay", Protocol.RELAY).put("notify_new_pools", engine.notifyNewPools)
         if (w != null) {
+            val mixed = engine.mixedScripts()
             o.put("balance", w.coins.sumOf { it.value }).put("scannedAt", w.scannedAt)
             o.put("coins", JSONArray(w.coins.map { c ->
                 JSONObject().put("outpoint", c.outpoint).put("value", c.value).put("address", c.address)
+                    .put("label", when { w.script(c.branch, c.index).toHex() in mixed -> "mixed"; c.branch == 1 -> "change"; else -> "" })
                     .put("confirmations", w.confirmations(c)).put("inRound", c.outpoint in locked)
             }))
         }

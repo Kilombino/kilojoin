@@ -5,7 +5,7 @@ const app = $("#app");
 const sats = (v) => Number(v).toLocaleString("en").replace(/,/g, " ");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MIN = 10000, MAX = 100000000;
-let st = null, pools = [], view = "home", joining = null, chosen = null, msg = "", received = null, copied = false;
+let st = null, pools = [], view = "home", joining = null, chosen = null, msg = "", received = null, copied = false, sending = null;
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -103,9 +103,55 @@ function coinPicker(amount, rate) {
     const ch = c.value - amount - feeWithChange(rate);
     const note = c.value === min ? `<span class="good">★ EXACT · no change · fee ${sats(c.value - amount)}</span>` :
       ch > 294 ? `change ${sats(ch)} · fee ${sats(c.value - amount - ch)}` : `<span class="warn">no change, ${sats(c.value - min)} extra goes to the miners</span>`;
-    return `<div class="pick ${chosen === c.outpoint ? "sel" : ""}" data-coin="${c.outpoint}"><b>${sats(c.value)} sats</b> <span class="faint">${c.confirmations} conf</span><br><span class="faint">${note}</span></div>`;
+    return `<div class="pick ${chosen === c.outpoint ? "sel" : ""}" data-coin="${c.outpoint}"><b>${sats(c.value)} sats</b> <span class="faint">${c.confirmations} conf${c.label ? " · " + c.label : ""}</span><br><span class="faint">${note}</span></div>`;
   }).join("");
 }
+
+// The perfect coin for a pool: a payment to yourself of exactly amount + the no-change fee share.
+function exactButton(amount, rate) {
+  const exact = amount + feeNoChange(rate);
+  if ((st.coins || []).some((c) => c.value === exact && !c.inRound)) return "";
+  return `<button class="ghost" id="exact" data-exact="${exact}">＋ PREPARE AN EXACT COIN OF ${sats(exact)} SATS</button>`;
+}
+
+function sendPanel() {
+  const sd = sending;
+  const coins = (st.coins || []).filter((c) => !c.inRound);
+  let h = `<div class="panel"><div class="label">${sd.exact ? "Exact coin · " + sats(sd.amount) + " sats to yourself" : "Send"}</div>`;
+  if (sd.exact) h += `<p class="faint">A payment to a fresh address of this wallet. After one confirmation it joins with no change. Mixed coins are left out on purpose.</p>`;
+  h += `<p class="faint">Tick the coins to spend (coin control). Never spend a mixed coin with other coins: that links them again.</p>`;
+  h += coins.map((c) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" style="width:auto" data-sc="${c.outpoint}" ${sd.coins.includes(c.outpoint) ? "checked" : ""}>
+      <span><b>${sats(c.value)}</b> sats <span class="faint">${c.confirmations} conf${c.label ? " · <span class='" + (c.label === "mixed" ? "good" : "muted") + "'>" + c.label + "</span>" : ""} · ${esc(c.address.slice(0, 10))}…</span></span></label>`).join("");
+  if (!sd.exact) h += `<label>to address</label><input id="s-addr" value="${esc(sd.address || "")}" placeholder="bc1…">
+    <label>amount in sats (empty = everything ticked, less the fee)</label><input id="s-amount" value="${sd.amount || ""}">`;
+  h += `<label>fee (sat/vB)${sd.suggested ? " · your node suggests " + sd.suggested.toFixed(1) : " · your node has no estimate (quiet mempool)"}</label><input id="s-rate" value="${sd.feeRate}">`;
+  if (sd.preview) {
+    const p = sd.preview;
+    h += `<div class="panel" style="margin:10px 0"><p>${sats(p.amount)} sats → <code>${esc(p.address)}</code></p>
+      <p class="faint">from ${p.inputs} coin(s) of ${sats(p.total)} · fee ${sats(p.fee)} (${p.vbytes} vB at ${p.feeRate} sat/vB)${p.change > 0 ? " · change " + sats(p.change) + " back to you" : " · no change"}</p>
+      ${p.warning ? `<p class="warn">⚠️ ${esc(p.warning)}</p>` : ""}</div>`;
+  }
+  if (sd.txid) h += `<p class="good">Sent ✓ <code>${esc(sd.txid)}</code></p>`;
+  h += `<div class="row"><button class="soft" id="s-cancel">${sd.txid ? "CLOSE" : "CANCEL"}</button>` +
+    (sd.txid ? "" : sd.preview ? `<button id="s-send">${sd.preview.warning ? "SEND ANYWAY" : "SEND"}</button>` : `<button id="s-preview">REVIEW</button>`) + `</div></div>`;
+  return h;
+}
+
+async function startSend(opts) {
+  const f = await api("/api/fee").catch(() => ({}));
+  const rate = f.suggested ? Math.max(1, Math.round(f.suggested * 10) / 10) : 1;
+  sending = Object.assign({ coins: [], address: "", amount: "", feeRate: rate, suggested: f.suggested || null, preview: null, txid: null }, opts || {});
+  homeScreen();
+}
+
+function readSend() {
+  const sd = sending;
+  sd.coins = [...document.querySelectorAll("[data-sc]")].filter((b) => b.checked).map((b) => b.dataset.sc);
+  if ($("#s-addr")) sd.address = $("#s-addr").value.trim();
+  if ($("#s-amount")) sd.amount = $("#s-amount").value.replace(/\D/g, "");
+  sd.feeRate = parseFloat($("#s-rate").value) || 1;
+}
+const sendBody = () => ({ coins: sending.coins, address: sending.address, amount: parseInt(sending.amount) || 0, feeRate: sending.feeRate });
 
 function homeScreen() {
   const mine = st.mine || [];
@@ -114,15 +160,16 @@ function homeScreen() {
   if (msg) h += `<div class="panel warn">${esc(msg)} <button class="ghost" id="msgok">ok</button></div>`;
   h += `<div class="panel"><div class="label">Wallet</div><div class="big">${sats(st.balance || 0)} <span style="font-size:18px">sats</span></div>
     <p class="faint">height ${st.height} · ${st.scannedAt ? "scanned " + new Date(st.scannedAt).toLocaleTimeString() : "scanning the UTXO set… (can take a minute)"} · relay ${esc(st.relay)}</p>
-    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE ADDRESS</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
-  if (joining) {
+    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE ADDRESS</button><button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
+  if (sending) h += sendPanel();
+  else if (joining) {
     h += `<div class="panel"><div class="label">${joining.create ? "Open a pool" : "Join · " + sats(joining.amount) + " sats"}</div>`;
     if (joining.create) h += `<div class="row"><div><label>amount per person (sats)</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
       <div class="row"><div><label>fewest people</label><input id="c-min" value="2"></div><div><label>most people</label><input id="c-max" value="5"></div><div><label>open for (hours)</label><input id="c-hours" value="6"></div></div>
       <label>password (optional: makes it private 🔒)</label><input id="c-pw">`;
     else if (joining.private) h += `<label>🔒 pool password</label><input id="c-pw">`;
     h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate))} sats with change, ${sats(feeNoChange(joining.feeRate))} without. Pick ONE confirmed coin:</p>
-      <div id="coins">${coinPicker(joining.amount, joining.feeRate)}</div>
+      <div id="coins">${coinPicker(joining.amount, joining.feeRate)}</div>${exactButton(joining.amount, joining.feeRate)}
       <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${chosen ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
   } else h += `<button id="create">＋ OPEN A POOL</button>`;
   if (mine.length) h += `<div class="label" style="margin-top:18px">Your pools</div>` + mine.map(myPool).join("");
@@ -149,6 +196,28 @@ function bind() {
     catch (e) { const r = document.createRange(); r.selectNodeContents($("#addrtext")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); document.execCommand("copy"); }
     copied = true; homeScreen();
   });
+  on("#send", () => startSend());
+  on("#exact", async () => {
+    const exact = parseInt($("#exact").dataset.exact);
+    const r = await api("/api/receive");
+    // Pay for it with unmixed coins only, the biggest first, until they cover it.
+    const pool = (st.coins || []).filter((c) => !c.inRound && c.label !== "mixed" && c.confirmations > 0).sort((a, b) => b.value - a.value);
+    const pick = []; let sum = 0;
+    for (const c of pool) { if (sum >= exact + 500) break; pick.push(c.outpoint); sum += c.value; }
+    joining = null; chosen = null;
+    await startSend({ exact: true, address: r.address, amount: String(exact), coins: pick });
+  });
+  on("#s-cancel", () => { sending = null; homeScreen(); });
+  on("#s-preview", async () => { readSend(); try { sending.preview = await api("/api/send/preview", sendBody()); } catch (e) { msg = e.message; } homeScreen(); });
+  on("#s-send", async () => {
+    try { const r = await api("/api/send", Object.assign(sendBody(), { acceptWarning: true })); sending.txid = r.txid; sending.preview = null; }
+    catch (e) { msg = e.message; }
+    homeScreen();
+  });
+  // Typing only updates the draft (redrawing would steal the focus); an old review is dropped.
+  document.querySelectorAll("[data-sc],#s-addr,#s-amount,#s-rate").forEach((el) => (el.oninput = el.onchange = () => {
+    readSend(); if (sending.preview) { sending.preview = null; homeScreen(); }
+  }));
   on("#refresh", async () => { pools = await api("/api/pools"); homeScreen(); });
   on("#create", () => { joining = { create: true, amount: MIN, feeRate: 2 }; chosen = null; homeScreen(); });
   on("#cancel", () => { joining = null; chosen = null; homeScreen(); });
@@ -194,4 +263,4 @@ load();
 // Keep the round moving on screen (not while a form is open).
 // Not while text is selected either, so an address can be copied by hand.
 const selecting = () => { const s = getSelection(); return s && !s.isCollapsed; };
-setInterval(async () => { if (st && st.unlocked && !joining && !selecting()) { try { st = await api("/api/status"); homeScreen(); } catch (e) {} } }, 5000);
+setInterval(async () => { if (st && st.unlocked && !joining && !sending && !selecting()) { try { st = await api("/api/status"); homeScreen(); } catch (e) {} } }, 5000);
