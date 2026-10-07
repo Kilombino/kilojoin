@@ -139,7 +139,11 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 .put("#t", JSONArray().put(Protocol.TAG)).put("since", System.currentTimeMillis() / 1000 - sinceSeconds)))
         } finally { r.close() }
         val now = System.currentTimeMillis() / 1000
-        return found.values.filter { it.state == "open" && it.expiresAt > now && it.peers < it.maxPeers && it.amount >= Protocol.MIN_AMOUNT }
+        // A pool not re-announced for a while has lost its creator: nobody would let us in.
+        return found.values.filter {
+            it.state == "open" && it.expiresAt > now && it.peers < it.maxPeers && it.amount >= Protocol.MIN_AMOUNT &&
+                now - it.createdAt < Protocol.STALE_AFTER
+        }
             .sortedByDescending { it.createdAt }
     }
 

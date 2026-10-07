@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.kilombino.kilojoin"
-version = "0.2.0"
+version = "0.2.1"
 
 kotlin {
     jvmToolchain(17)
@@ -22,6 +22,7 @@ sourceSets {
             srcDir("kilowallet/app/src/main/java")
             include("com/kilombino/kilojoin/**")
             include("com/kilombino/pyblockwatch/crypto/**")
+            include("com/kilombino/pyblockwatch/ark/ArkNativeStub.kt") // no Ark engine here: Kotlin signing
             include("com/kilombino/pyblockwatch/coinjoin/CoinjoinTx.kt")
             include("com/kilombino/pyblockwatch/coinjoin/Nip44.kt")
             include("com/kilombino/pyblockwatch/coinjoin/NostrEvent.kt")
