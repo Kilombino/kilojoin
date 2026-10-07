@@ -1,0 +1,178 @@
+package com.kilombino.kilojoin
+
+import com.kilombino.pyblockwatch.coinjoin.CoinjoinTx
+import com.kilombino.pyblockwatch.coinjoin.PoolSession
+import com.kilombino.pyblockwatch.coinjoin.Protocol
+import com.kilombino.pyblockwatch.coinjoin.RelayClient
+import com.kilombino.pyblockwatch.crypto.Bip32Priv
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+/**
+ * The node's coinjoin side: the same pools, protocol and relay as the Kilowallet app
+ * ([Protocol.RELAY]), so phones and nodes meet in the same rounds. Keeps this node's rounds
+ * (persisted), lists the open pools, and records what happened as events for the web page and
+ * for StartOS notifications.
+ */
+class Engine(private val dir: File, private val rpc: Rpc, private val walletProvider: () -> Wallet?) {
+    private val sessionsFile = File(dir, "sessions.json")
+    private val settingsFile = File(dir, "settings.json")
+    private val sessions = ConcurrentHashMap<String, PoolSession>()
+
+    data class Event(val at: Long, val title: String, val text: String, val pool: String?)
+    val events = CopyOnWriteArrayList<Event>()
+    /** Called for every event (StartOS notifications hook in here). */
+    @Volatile var onEvent: (Event) -> Unit = {}
+
+    private fun sats(v: Long) = "%,d".format(v).replace(',', ' ')
+
+    // ------------------------------------------------------------------ settings
+
+    fun settings(): JSONObject = if (settingsFile.exists()) JSONObject(settingsFile.readText()) else JSONObject()
+    fun setSetting(k: String, v: Any) { val o = settings(); o.put(k, v); settingsFile.writeText(o.toString()) }
+    val notifyNewPools: Boolean get() = settings().optBoolean("notify_new_pools", true)
+
+    // ------------------------------------------------------------------ persistence
+
+    @Synchronized
+    private fun persist() {
+        val a = JSONArray(); sessions.values.forEach { a.put(it.state.toJson()) }
+        val tmp = File(dir, "sessions.json.tmp"); tmp.writeText(a.toString()); tmp.renameTo(sessionsFile)
+    }
+
+    fun load() {
+        if (!sessionsFile.exists()) return
+        val weekAgo = System.currentTimeMillis() / 1000 - 7 * 86400
+        val a = runCatching { JSONArray(sessionsFile.readText()) }.getOrNull() ?: return
+        for (i in 0 until a.length()) {
+            val st = runCatching { PoolSession.State.parse(a.getJSONObject(i)) }.getOrNull() ?: continue
+            val over = st.phase in setOf(PoolSession.Phase.CONFIRMED, PoolSession.Phase.ABORTED, PoolSession.Phase.REJECTED)
+            if (over && st.created < weekAgo) continue
+            sessions[st.poolId] = PoolSession(env(st), st)
+        }
+    }
+
+    fun startAll() = sessions.values.filter { !it.done }.forEach { s -> Thread { runCatching { s.start() } }.start() }
+
+    fun states(): List<PoolSession.State> = sessions.values.map { it.state }.sortedByDescending { it.created }
+    fun session(id: String): PoolSession? = sessions[id]
+    fun remove(id: String) { sessions.remove(id)?.stop(); persist() }
+    fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done && it.state.phase != PoolSession.Phase.BROADCAST }
+        .map { it.state.seat.coin.outpoint }.toSet()
+
+    // ------------------------------------------------------------------ joining
+
+    private fun add(st: PoolSession.State): PoolSession {
+        val s = PoolSession(env(st), st)
+        sessions[st.poolId] = s; persist()
+        Thread { runCatching { s.start() } }.start()
+        return s
+    }
+
+    private fun pick(secret: Vault.Secret, w: Wallet, c: Wallet.Coin): Triple<CoinjoinTx.Coin, java.math.BigInteger, Pair<ByteArray, ByteArray>> {
+        val node = Bip32Priv.derivePath(Wallet.master(secret), c.path)
+        val coin = CoinjoinTx.Coin(c.txid, c.vout, c.value, node.publicKey())
+        val mix = w.fresh(0).second
+        val change = w.fresh(1).second
+        return Triple(coin, node.key, mix to change)
+    }
+
+    fun create(secret: Vault.Secret, w: Wallet, c: Wallet.Coin, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
+               hours: Int, password: String?): PoolSession.State {
+        val (terms, poolSecret) = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty())
+        val (coin, key, scripts) = pick(secret, w, c)
+        return add(PoolSession.newState(terms, true, poolSecret, coin, key, c.path, scripts.first, scripts.second,
+            password?.ifEmpty { null })).state
+    }
+
+    fun join(secret: Vault.Secret, w: Wallet, c: Wallet.Coin, terms: Protocol.Terms, password: String?): PoolSession.State {
+        val (coin, key, scripts) = pick(secret, w, c)
+        return add(PoolSession.newState(terms, false, null, coin, key, c.path, scripts.first, scripts.second,
+            password?.ifEmpty { null })).state
+    }
+
+    fun sign(secret: Vault.Secret, poolId: String) {
+        val s = sessions[poolId] ?: error("no such pool")
+        s.sign(Bip32Priv.derivePath(Wallet.master(secret), s.state.coinPath).key)
+    }
+
+    // ------------------------------------------------------------------ open pools
+
+    fun fetchPools(sinceSeconds: Long = 3 * 86400): List<Protocol.Terms> {
+        val found = ConcurrentHashMap<String, Protocol.Terms>()
+        val r = RelayClient(Protocol.RELAY, { _, ev ->
+            Protocol.Terms.parse(ev)?.let { t -> if ((found[t.id]?.createdAt ?: 0) < t.createdAt) found[t.id] = t }
+        })
+        try {
+            r.connect()
+            r.subscribe("pools", listOf(JSONObject().put("kinds", JSONArray().put(Protocol.KIND_POOL))
+                .put("#t", JSONArray().put(Protocol.TAG)).put("since", System.currentTimeMillis() / 1000 - sinceSeconds)))
+        } finally { r.close() }
+        val now = System.currentTimeMillis() / 1000
+        return found.values.filter { it.state == "open" && it.expiresAt > now && it.peers < it.maxPeers && it.amount >= Protocol.MIN_AMOUNT }
+            .sortedByDescending { it.createdAt }
+    }
+
+    /** Every few minutes: tell about public pools opened since the last look. */
+    fun startPoolWatcher() {
+        Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({
+            runCatching {
+                if (!notifyNewPools) return@runCatching
+                val last = settings().optLong("last_pool_seen", System.currentTimeMillis() / 1000 - 3600)
+                val pools = fetchPools(86400).filter { it.createdAt > last && it.id !in sessions.keys && !it.private }
+                pools.maxOfOrNull { it.createdAt }?.let { setSetting("last_pool_seen", it) }
+                pools.take(3).forEach { t -> emit("New coinjoin pool",
+                    "${sats(t.amount)} sats · ${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
+            }
+        }, 20, 300, TimeUnit.SECONDS)
+    }
+
+    // ------------------------------------------------------------------ events
+
+    private fun emit(title: String, text: String, pool: String?) {
+        val e = Event(System.currentTimeMillis(), title, text, pool)
+        events.add(0, e); while (events.size > 200) events.removeAt(events.size - 1)
+        runCatching { onEvent(e) }
+    }
+
+    private fun env(st: PoolSession.State): PoolSession.Env = object : PoolSession.Env {
+        override fun coinUnspent(coin: CoinjoinTx.Coin): Boolean {
+            val o = rpc.txOut(coin.txid, coin.vout) ?: return false
+            return Math.round(o.getDouble("value") * 1e8) == coin.value
+        }
+        override fun broadcast(rawHex: String): String = rpc.call("sendrawtransaction", rawHex) as String
+        override fun confirmations(txid: String): Int? {
+            // Our mixed output is somewhere in the transaction; any unspent output tells.
+            for (i in 0 until 60) { rpc.txOut(txid, i)?.let { return it.optInt("confirmations") } }
+            return runCatching { (rpc.call("getrawtransaction", txid, true) as JSONObject).optInt("confirmations") }.getOrNull()
+        }
+        override fun save(state: PoolSession.State) {
+            if (state.phase == PoolSession.Phase.ABORTED && state.reason == PoolSession.LEFT_BY_CHOICE) {
+                sessions.remove(state.poolId)?.let { gone -> Thread { runCatching { gone.stop() } }.start() }
+            }
+            persist()
+        }
+        override fun event(e: PoolSession.Event) {
+            val pool = "${sats(st.terms.amount)} sats pool"
+            when (e) {
+                is PoolSession.Event.Changed -> {}
+                is PoolSession.Event.Welcomed -> emit("Coinjoin: you are in", "$pool · waiting for more people", st.poolId)
+                is PoolSession.Event.Rejected -> emit("Coinjoin: join refused", e.reason, st.poolId)
+                is PoolSession.Event.Joined -> emit("Coinjoin: someone joined", "$pool · ${e.peers}/${st.terms.maxPeers} people", st.poolId)
+                is PoolSession.Event.CloseRequested -> if (!e.byMe) emit("Coinjoin: close now?", "$pool · ${e.peers} people. Accept or refuse.", st.poolId)
+                is PoolSession.Event.CloseRefused -> emit("Coinjoin: stays open", "$pool · someone said not yet", st.poolId)
+                is PoolSession.Event.Closing -> emit("Coinjoin: closing", "$pool · ${e.peers} people", st.poolId)
+                is PoolSession.Event.SignNeeded -> emit("Coinjoin: sign now", "$pool · the transaction is ready to sign", st.poolId)
+                is PoolSession.Event.Broadcast -> emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId)
+                is PoolSession.Event.Confirmed -> emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId)
+                is PoolSession.Event.Aborted -> emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId)
+            }
+        }
+        override fun log(msg: String) { System.err.println("[${st.poolId.take(8)}] $msg") }
+    }
+}
