@@ -5,7 +5,7 @@ const app = $("#app");
 const sats = (v) => Number(v).toLocaleString("en").replace(/,/g, " ");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MIN = 10000, MAX = 100000000;
-let st = null, pools = [], view = "home", joining = null, chosen = null, msg = "";
+let st = null, pools = [], view = "home", joining = null, chosen = null, msg = "", received = null, copied = false;
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -81,8 +81,10 @@ function myPool(p) {
   let actions = "";
   if (p.phase === "OPEN") actions = (p.people >= p.minPeers ? `<button data-a="close" data-p="${p.id}">ASK TO CLOSE NOW</button> ` : "") +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
-  if (p.phase === "VOTING") actions = p.iAsked || p.voted ? `<span class="muted">Waiting for the others…</span>` :
-    `<button data-a="yes" data-p="${p.id}">ACCEPT</button> <button class="soft" data-a="no" data-p="${p.id}">NOT YET</button>`;
+  if (p.phase === "VOTING") actions = (p.iAsked || p.voted
+    ? `<p class="muted">Waiting for the others, ${left(p.voteDeadline)} left. Whoever has not answered by then is left out; if too few are left, the pool reopens without them.</p>`
+    : `<p class="muted">Answer within ${left(p.voteDeadline)}.</p><button data-a="yes" data-p="${p.id}">ACCEPT</button> <button class="soft" data-a="no" data-p="${p.id}">NOT YET</button> `) +
+    `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
   if (p.phase === "SIGNING") actions = p.signed ? `<span class="muted">Signed. Waiting for the others (${p.sigs}/${p.planPeople})…</span>` :
     `<p class="muted">Checked: ${p.planPeople} people, identical outputs of ${sats(p.amount)} sats, one of them yours; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
   if (p.txid) actions += `<p><code>${esc(p.txid)}</code></p>`;
@@ -112,7 +114,7 @@ function homeScreen() {
   if (msg) h += `<div class="panel warn">${esc(msg)} <button class="ghost" id="msgok">ok</button></div>`;
   h += `<div class="panel"><div class="label">Wallet</div><div class="big">${sats(st.balance || 0)} <span style="font-size:18px">sats</span></div>
     <p class="faint">height ${st.height} · ${st.scannedAt ? "scanned " + new Date(st.scannedAt).toLocaleTimeString() : "scanning the UTXO set… (can take a minute)"} · relay ${esc(st.relay)}</p>
-    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE ADDRESS</button></div><p id="addr"></p></div>`;
+    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE ADDRESS</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
   if (joining) {
     h += `<div class="panel"><div class="label">${joining.create ? "Open a pool" : "Join · " + sats(joining.amount) + " sats"}</div>`;
     if (joining.create) h += `<div class="row"><div><label>amount per person (sats)</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
@@ -139,7 +141,14 @@ function bind() {
   const on = (id, f) => { const e = $(id); if (e) e.onclick = f; };
   on("#msgok", () => { msg = ""; homeScreen(); });
   on("#scan", async () => { $("#scan").disabled = true; $("#scan").textContent = "scanning…"; st = await api("/api/scan", {}); homeScreen(); });
-  on("#recv", async () => { const r = await api("/api/receive"); $("#addr").innerHTML = `<code>${esc(r.address)}</code><br><span class="faint">fresh address #${r.index}, used only once</span>`; });
+  // The address stays on screen (the 5-second refresh redraws the page) until hidden.
+  on("#recv", async () => { received = await api("/api/receive"); copied = false; homeScreen(); });
+  on("#hideaddr", () => { received = null; homeScreen(); });
+  on("#copy", async () => {
+    try { await navigator.clipboard.writeText(received.address); }
+    catch (e) { const r = document.createRange(); r.selectNodeContents($("#addrtext")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); document.execCommand("copy"); }
+    copied = true; homeScreen();
+  });
   on("#refresh", async () => { pools = await api("/api/pools"); homeScreen(); });
   on("#create", () => { joining = { create: true, amount: MIN, feeRate: 2 }; chosen = null; homeScreen(); });
   on("#cancel", () => { joining = null; chosen = null; homeScreen(); });
@@ -183,4 +192,6 @@ async function load() {
 }
 load();
 // Keep the round moving on screen (not while a form is open).
-setInterval(async () => { if (st && st.unlocked && !joining) { try { st = await api("/api/status"); homeScreen(); } catch (e) {} } }, 5000);
+// Not while text is selected either, so an address can be copied by hand.
+const selecting = () => { const s = getSelection(); return s && !s.isCollapsed; };
+setInterval(async () => { if (st && st.unlocked && !joining && !selecting()) { try { st = await api("/api/status"); homeScreen(); } catch (e) {} } }, 5000);

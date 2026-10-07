@@ -198,7 +198,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         return JSONObject().put("id", st.poolId).put("amount", st.terms.amount).put("feeRate", st.terms.feeRate)
             .put("creator", st.creator).put("private", st.terms.private).put("phase", st.phase.name).put("reason", st.reason)
             .put("people", people).put("minPeers", st.terms.minPeers).put("maxPeers", st.terms.maxPeers)
-            .put("expiresAt", st.terms.expiresAt).put("phaseDeadline", st.phaseDeadline)
+            .put("expiresAt", st.terms.expiresAt).put("phaseDeadline", st.phaseDeadline).put("voteDeadline", st.voteDeadline)
             .put("coinValue", st.seat.coin.value).put("change", st.seat.changeValue)
             .put("iAsked", st.voteBy != null && st.voteBy == st.token?.let { Protocol.tokenHash(it) })
             .put("voted", st.votedOn != null && st.votedOn == st.voteId)
