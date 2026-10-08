@@ -31,6 +31,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
 
     init {
         engine = Engine(dir, rpc) { wallet }
+        engine.secretProvider = { secret }
         engine.settings().optString("xpub").takeIf { it.isNotEmpty() }?.let { wallet = Wallet(dir, rpc, it) }
         engine.load(); engine.startAll(); engine.startPoolWatcher()
         server.executor = Executors.newFixedThreadPool(8)
@@ -105,7 +106,14 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             "/api/events" -> reply(ex, 200, JSONArray(engine.events.map { eventJson(it) }))
             "/api/settings" -> {
                 if (b.has("notify_new_pools")) engine.setSetting("notify_new_pools", b.getBoolean("notify_new_pools"))
-                reply(ex, 200, JSONObject().put("notify_new_pools", engine.notifyNewPools))
+                if (b.has("auto_sign")) engine.setSetting("auto_sign", b.getBoolean("auto_sign"))
+                if (b.has("telegram_token")) engine.setSetting("telegram_token", b.getString("telegram_token").trim())
+                if (b.has("telegram_chat")) engine.setSetting("telegram_chat", b.getString("telegram_chat").trim())
+                reply(ex, 200, settingsJson())
+            }
+            "/api/telegram/test" -> {
+                val r = engine.telegram("Kilojoin: test message. Pool events will arrive here.")
+                reply(ex, if (r.isSuccess) 200 else 400, if (r.isSuccess) ok() else err(r.exceptionOrNull()?.message ?: "failed"))
             }
             "/api/create" -> {
                 val c = coin(w!!, b.getString("coin"))
@@ -214,6 +222,11 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
 
     // ------------------------------------------------------------------ JSON
 
+    /** Telegram settings for the page: whether it is set up, never the token itself. */
+    private fun settingsJson() = JSONObject().put("notify_new_pools", engine.notifyNewPools).put("auto_sign", engine.autoSign)
+        .put("telegram_set", engine.settings().optString("telegram_token").isNotEmpty())
+        .put("telegram_chat", engine.settings().optString("telegram_chat"))
+
     private fun eventJson(e: Engine.Event) = JSONObject().put("at", e.at).put("title", e.title).put("text", e.text).put("pool", e.pool ?: "")
 
     private fun termsJson(t: Protocol.Terms) = JSONObject()
@@ -227,6 +240,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         val o = JSONObject().put("setup", true).put("unlocked", secret != null)
             .put("height", runCatching { rpc.height() }.getOrDefault(0))
             .put("relay", Protocol.RELAY).put("notify_new_pools", engine.notifyNewPools)
+            .put("auto_sign", engine.autoSign).put("telegram", settingsJson())
         if (w != null) {
             val mixed = engine.mixedScripts()
             o.put("balance", w.coins.sumOf { it.value }).put("scannedAt", w.scannedAt)

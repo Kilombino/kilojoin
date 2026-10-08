@@ -29,6 +29,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     val events = CopyOnWriteArrayList<Event>()
     /** Called for every event (StartOS notifications hook in here). */
     @Volatile var onEvent: (Event) -> Unit = {}
+    /** The unlocked wallet's words, for signing on its own (null while locked). */
+    @Volatile var secretProvider: () -> Vault.Secret? = { null }
 
     private fun sats(v: Long) = "%,d".format(v).replace(',', ' ')
 
@@ -37,6 +39,20 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun settings(): JSONObject = if (settingsFile.exists()) JSONObject(settingsFile.readText()) else JSONObject()
     fun setSetting(k: String, v: Any) { val o = settings(); o.put(k, v); settingsFile.writeText(o.toString()) }
     val notifyNewPools: Boolean get() = settings().optBoolean("notify_new_pools", true)
+    /** Accept close requests and sign by itself when the transaction checks out (off by default). */
+    val autoSign: Boolean get() = settings().optBoolean("auto_sign", false)
+
+    /** Telegram, through the user's own bot: every event also arrives there, with sound. */
+    fun telegram(text: String): Result<Unit> = runCatching {
+        val token = settings().optString("telegram_token").trim(); val chat = settings().optString("telegram_chat").trim()
+        if (token.isEmpty() || chat.isEmpty()) return@runCatching
+        val c = java.net.URL("https://api.telegram.org/bot$token/sendMessage").openConnection() as java.net.HttpURLConnection
+        c.requestMethod = "POST"; c.doOutput = true; c.connectTimeout = 15_000; c.readTimeout = 15_000
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(JSONObject().put("chat_id", chat).put("text", text).toString().toByteArray()) }
+        val code = c.responseCode
+        if (code != 200) error("Telegram answered $code: " + (c.errorStream?.bufferedReader()?.readText()?.take(200) ?: ""))
+    }
 
     /**
      * Scripts of this wallet's mixed outputs (hex), kept in settings so a coin stays marked
@@ -165,6 +181,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
 
     private fun emit(title: String, text: String, pool: String?) {
         val e = Event(System.currentTimeMillis(), title, text, pool)
+        Thread { telegram("$title\n$text") }.start()
         events.add(0, e); while (events.size > 200) events.removeAt(events.size - 1)
         runCatching { onEvent(e) }
     }
@@ -193,10 +210,26 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 is PoolSession.Event.Welcomed -> emit("Coinjoin: you are in", "$pool · waiting for more people", st.poolId)
                 is PoolSession.Event.Rejected -> emit("Coinjoin: join refused", e.reason, st.poolId)
                 is PoolSession.Event.Joined -> emit("Coinjoin: someone joined", "$pool · ${e.peers}/${st.terms.maxPeers} people", st.poolId)
-                is PoolSession.Event.CloseRequested -> if (!e.byMe) emit("Coinjoin: close now?", "$pool · ${e.peers} people. Accept or refuse.", st.poolId)
+                is PoolSession.Event.CloseRequested -> if (!e.byMe) {
+                    if (autoSign) {
+                        Thread { runCatching { Thread.sleep(2000); sessions[st.poolId]?.vote(true) } }.start()
+                        emit("Coinjoin: closing accepted", "$pool · ${e.peers} people (accepted on its own)", st.poolId)
+                    } else emit("Coinjoin: close now?", "$pool · ${e.peers} people. Accept or refuse.", st.poolId)
+                }
                 is PoolSession.Event.CloseRefused -> emit("Coinjoin: stays open", "$pool · someone said not yet", st.poolId)
                 is PoolSession.Event.Closing -> emit("Coinjoin: closing", "$pool · ${e.peers} people", st.poolId)
-                is PoolSession.Event.SignNeeded -> emit("Coinjoin: sign now", "$pool · the transaction is ready to sign", st.poolId)
+                is PoolSession.Event.SignNeeded -> {
+                    val secret = secretProvider()
+                    if (autoSign && secret != null) Thread {
+                        Thread.sleep(2000)
+                        // sign() checks our mixed output, change and fee first, and refuses otherwise.
+                        runCatching { sign(secret, st.poolId) }
+                            .onSuccess { emit("Coinjoin: signed", "$pool · checked and signed on its own", st.poolId) }
+                            .onFailure { emit("Coinjoin: NOT signed", "$pool · ${it.message}. Check it in Kilojoin.", st.poolId) }
+                    }.start()
+                    else emit("Coinjoin: sign now", "$pool · the transaction is ready to sign" +
+                        (if (autoSign) " (Kilojoin is locked: unlock it to sign)" else ""), st.poolId)
+                }
                 is PoolSession.Event.Broadcast -> { rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScript.toHex()); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Aborted -> emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId)

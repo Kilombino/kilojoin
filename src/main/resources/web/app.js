@@ -178,7 +178,13 @@ function homeScreen() {
       <span class="faint">${t.peers}/${t.maxPeers} people (min ${t.minPeers}) · ${t.feeRate} sat/vB · closes in ${left(t.expiresAt)}<br>
       costs you ${sats(t.feeWithChange)} sats (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span></div>
       <button class="soft" data-join="${t.id}" style="flex:0">JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
-  h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label></div>`;
+  h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label>
+    <p class="small">Also to Telegram, with sound, through your own bot: make one with @BotFather, send it any message, and put its token and your chat id here (@userinfobot tells you your id).</p>
+    <input id="tgToken" placeholder="${st.telegram && st.telegram.telegram_set ? "bot token (saved; type to replace)" : "bot token"}" autocomplete="off">
+    <input id="tgChat" placeholder="your chat id" value="${(st.telegram && st.telegram.telegram_chat) || ""}">
+    <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span></div>`;
+  h += `<div class="panel"><div class="label">Sign on its own</div><label><input type="checkbox" id="autoSign" style="width:auto" ${st.auto_sign ? "checked" : ""}> accept close requests and sign by itself</label>
+    <p class="small">So a round does not wait for you. It signs only when the final transaction checks out (your mixed output, your change and your share of the fee), and only while Kilojoin is unlocked; otherwise it does not sign and tells you why.</p></div>`;
   app.innerHTML = h;
   bind();
 }
@@ -246,6 +252,12 @@ function bind() {
     } catch (e) { msg = e.message; homeScreen(); }
   }));
   const n = $("#notify"); if (n) n.onchange = () => api("/api/settings", { notify_new_pools: n.checked });
+  const as = $("#autoSign"); if (as) as.onchange = () => api("/api/settings", { auto_sign: as.checked });
+  const tgMsg = m => { const e = $("#tgMsg"); if (e) e.textContent = m; };
+  const ts = $("#tgSave"); if (ts) ts.onclick = async () => {
+    const body = { telegram_chat: $("#tgChat").value }; if ($("#tgToken").value) body.telegram_token = $("#tgToken").value;
+    try { await api("/api/settings", body); tgMsg("saved"); } catch (e) { tgMsg(e.message); } };
+  const tt = $("#tgTest"); if (tt) tt.onclick = async () => { try { await api("/api/telegram/test", {}); tgMsg("sent ✓"); } catch (e) { tgMsg(e.message); } };
 }
 
 $("#lock").onclick = async () => { await api("/api/lock", {}); location.reload(); };
