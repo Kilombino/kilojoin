@@ -182,7 +182,8 @@ function homeScreen() {
     <p class="small">Also to Telegram, with sound, through your own bot: make one with @BotFather, send it any message, and put its token and your chat id here (@userinfobot tells you your id).</p>
     <input id="tgToken" placeholder="${st.telegram && st.telegram.telegram_set ? "bot token (saved; type to replace)" : "bot token"}" autocomplete="off">
     <input id="tgChat" placeholder="your chat id" value="${(st.telegram && st.telegram.telegram_chat) || ""}">
-    <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span></div>`;
+    <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span>
+    <label style="margin-top:10px;display:block"><input type="checkbox" id="beep" style="width:auto" ${soundOn() ? "checked" : ""}> sound and a notification in this browser, while this page is open</label></div>`;
   h += `<div class="panel"><div class="label">Sign on its own</div><label><input type="checkbox" id="autoSign" style="width:auto" ${st.auto_sign ? "checked" : ""}> accept close requests and sign by itself</label>
     <p class="small">So a round does not wait for you. It signs only when the final transaction checks out (your mixed output, your change and your share of the fee), and only while Kilojoin is unlocked; otherwise it does not sign and tells you why.</p></div>`;
   app.innerHTML = h;
@@ -225,7 +226,7 @@ function bind() {
     readSend(); if (sending.preview) { sending.preview = null; homeScreen(); }
   }));
   on("#refresh", async () => { pools = await api("/api/pools"); homeScreen(); });
-  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 2 }; chosen = null; homeScreen(); });
+  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 1 }; chosen = null; homeScreen(); });
   on("#cancel", () => { joining = null; chosen = null; homeScreen(); });
   document.querySelectorAll("[data-join]").forEach((b) => (b.onclick = () => { const t = pools.find((p) => p.id === b.dataset.join); joining = { create: false, id: t.id, amount: t.amount, feeRate: t.feeRate, private: t.private }; chosen = null; homeScreen(); }));
   document.querySelectorAll("[data-coin]").forEach((d) => (d.onclick = () => { chosen = d.dataset.coin; homeScreen(); }));
@@ -257,6 +258,10 @@ function bind() {
   const ts = $("#tgSave"); if (ts) ts.onclick = async () => {
     const body = { telegram_chat: $("#tgChat").value }; if ($("#tgToken").value) body.telegram_token = $("#tgToken").value;
     try { await api("/api/settings", body); tgMsg("saved"); } catch (e) { tgMsg(e.message); } };
+  const bp = $("#beep"); if (bp) bp.onchange = () => {
+    try { localStorage.setItem("kilojoin_sound", bp.checked ? "1" : "0"); } catch (e) {}
+    if (bp.checked) { chime(); if (window.Notification && Notification.permission === "default") Notification.requestPermission(); }
+  };
   const tt = $("#tgTest"); if (tt) tt.onclick = async () => { try { await api("/api/telegram/test", {}); tgMsg("sent ✓"); } catch (e) { tgMsg(e.message); } };
 }
 
@@ -276,3 +281,32 @@ load();
 // Not while text is selected either, so an address can be copied by hand.
 const selecting = () => { const s = getSelection(); return s && !s.isCollapsed; };
 setInterval(async () => { if (st && st.unlocked && !joining && !sending && !selecting()) { try { st = await api("/api/status"); homeScreen(); } catch (e) {} } }, 5000);
+
+// Sound (and a browser notification) for every pool event while this page is open.
+function soundOn() { try { return localStorage.getItem("kilojoin_sound") === "1"; } catch (e) { return false; } }
+function chime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [880, 1320].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + i * 0.18;
+      o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+      o.start(t); o.stop(t + 0.32);
+    });
+  } catch (e) {}
+}
+let lastEventAt = null;
+setInterval(async () => {
+  if (!st || !st.unlocked) return;
+  try {
+    const evs = await api("/api/events");
+    const newest = evs.length ? evs[0].at : 0;
+    if (lastEventAt === null) { lastEventAt = newest; return; } // what was there before this page opened
+    const fresh = evs.filter(e => e.at > lastEventAt);
+    lastEventAt = Math.max(lastEventAt, newest);
+    if (!fresh.length || !soundOn()) return;
+    chime();
+    if (window.Notification && Notification.permission === "granted")
+      fresh.slice(0, 3).forEach(e => new Notification(e.title, { body: e.text, tag: e.at + e.title }));
+  } catch (e) {}
+}, 5000);

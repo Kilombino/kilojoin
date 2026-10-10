@@ -233,6 +233,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 is PoolSession.Event.Broadcast -> { rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScript.toHex()); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Aborted -> emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId)
+                is PoolSession.Event.ExpiringSoon -> emit("Coinjoin: under an hour left",
+                    "$pool · ${e.peers}/${st.terms.maxPeers} people, enough to mix. It expires in ${e.minutes} min: ask to close now.", st.poolId)
             }
         }
         override fun log(msg: String) { System.err.println("[${st.poolId.take(8)}] $msg") }
