@@ -5,7 +5,7 @@ const app = $("#app");
 const sats = (v) => Number(v).toLocaleString("en").replace(/,/g, " ");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MIN = 10000, MAX = 100000000;
-let st = null, pools = [], view = "home", joining = null, chosen = null, msg = "", received = null, copied = false, sending = null;
+let st = null, pools = [], view = "home", joining = null, chosen = [], msg = "", received = null, copied = false, sending = null;
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -18,8 +18,19 @@ function left(at) {
   if (s <= 0) return "now";
   return s < 3600 ? Math.floor(s / 60) + " min" : Math.floor(s / 3600) + " h " + Math.floor((s % 3600) / 60) + " min";
 }
-const feeNoChange = (rate) => Math.ceil(rate * (68 + 31 + 10.5 / 2));
-const feeWithChange = (rate) => Math.ceil(rate * (68 + 31 + 31 + 10.5 / 2));
+// Each person's fee share, as Kilowallet works it out: their inputs, their outputs, half the overhead.
+// P2WPKH: input 68 vB, output 31. Taproot: input 57.75 (with the unified hash byte), output 43.
+const inVb = (t) => (t === "p2tr" ? 57.75 : 68), outVb = (t) => (t === "p2tr" ? 43 : 31);
+const feeNoChange = (rate, t = "p2wpkh", n = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) + 10.5 / 2));
+const feeWithChange = (rate, t = "p2wpkh", n = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) * 2 + 10.5 / 2));
+const kind = (t) => (t === "p2tr" ? "Taproot (bc1p)" : "native SegWit (bc1q)");
+const badge = (t) => `<span class="${t === "p2tr" ? "good" : "muted"}">${t === "p2tr" ? "bc1p" : "bc1q"}</span>`;
+// What a seat of these coins gives back: change, 0 (no change) or null (not enough).
+function seatChange(total, amount, rate, t, n) {
+  const w = total - amount - feeWithChange(rate, t, n);
+  if (w > 294) return w;
+  return total - amount - feeNoChange(rate, t, n) >= 0 ? 0 : null;
+}
 
 // ---------------------------------------------------------------- screens
 
@@ -85,43 +96,56 @@ function myPool(p) {
     ? `<p class="muted">Waiting for the others, ${left(p.voteDeadline)} left. Whoever has not answered by then is left out; if too few are left, the pool reopens without them.</p>`
     : `<p class="muted">Answer within ${left(p.voteDeadline)}.</p><button data-a="yes" data-p="${p.id}">ACCEPT</button> <button class="soft" data-a="no" data-p="${p.id}">NOT YET</button> `) +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
-  if (p.phase === "SIGNING") actions = p.signed ? `<span class="muted">Signed. Waiting for the others (${p.sigs}/${p.planPeople})…</span>` :
-    `<p class="muted">Checked: ${p.planPeople} people, identical outputs of ${sats(p.amount)} sats, one of them yours; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
+  if (p.phase === "SIGNING") actions = p.signed ? `<span class="muted">Signed. Waiting for the others (${p.sigs}/${p.planCoins} coins)…</span>` :
+    `<p class="muted">Checked: ${p.planPeople} people (${p.planCoins} coins), identical outputs of ${sats(p.amount)} sats, one of them yours; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
   if (p.txid) actions += `<p><code>${esc(p.txid)}</code></p>`;
   if (["CONFIRMED", "ABORTED", "REJECTED"].includes(p.phase)) actions += ` <button class="ghost" data-a="remove" data-p="${p.id}">remove</button>`;
   const cls = p.phase === "CONFIRMED" ? "good" : ["ABORTED", "REJECTED"].includes(p.phase) ? "bad" : ["VOTING", "SIGNING"].includes(p.phase) ? "warn" : "muted";
-  return `<div class="panel"><div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats</b><span class="faint" style="text-align:right">${p.creator ? "your pool" : "joined"}</span></div>
+  return `<div class="panel"><div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats${p.script === "p2tr" ? " · Taproot" : ""}</b><span class="faint" style="text-align:right">${p.creator ? "your pool" : "joined"}</span></div>
     <p class="${cls}">${esc(phaseText(p))}</p>
-    <p class="faint">your coin ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>${actions}</div>`;
+    <p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>${actions}</div>`;
 }
 
-function coinPicker(amount, rate) {
-  const min = amount + feeNoChange(rate);
-  const coins = (st.coins || []).filter((c) => !c.inRound && c.confirmations > 0 && c.value >= min).sort((a, b) => (a.value === min ? -1 : b.value === min ? 1 : b.value - a.value));
-  if (!coins.length) return `<p class="warn">No confirmed coin of at least ${sats(min)} sats. Send one to this wallet (receive below) and scan again.</p>`;
-  return coins.map((c) => {
-    const ch = c.value - amount - feeWithChange(rate);
-    const note = c.value === min ? `<span class="good">★ EXACT · no change · fee ${sats(c.value - amount)}</span>` :
-      ch > 294 ? `change ${sats(ch)} · fee ${sats(c.value - amount - ch)}` : `<span class="warn">no change, ${sats(c.value - min)} extra goes to the miners</span>`;
-    return `<div class="pick ${chosen === c.outpoint ? "sel" : ""}" data-coin="${c.outpoint}"><b>${sats(c.value)} sats</b> <span class="faint">${c.confirmations} conf${c.label ? " · " + c.label : ""}</span><br><span class="faint">${note}</span></div>`;
-  }).join("");
+// The pool's coins: only its address type; one coin each, or up to maxInputs ticked together.
+function coinPicker(amount, rate, t, maxInputs) {
+  const exact = amount + feeNoChange(rate, t, 1);
+  const coins = (st.coins || []).filter((c) => !c.inRound && c.confirmations > 0 && c.type === t && (maxInputs > 1 || c.value >= exact))
+    .sort((a, b) => (a.value === exact ? -1 : b.value === exact ? 1 : b.value - a.value));
+  let h = `<p class="faint">Only ${kind(t)} coins can join this pool${maxInputs > 1 ? `; tick up to ${maxInputs}` : "; pick ONE"}. Your other coins can still pay for an exact coin of this type below.</p>`;
+  if (!coins.length) return h + `<p class="warn">No confirmed ${kind(t)} coin${maxInputs > 1 ? "" : " of at least " + sats(exact) + " sats"}. Prepare an exact coin, or receive one and scan again.</p>`;
+  h += coins.map((c) => `<div class="pick ${chosen.includes(c.outpoint) ? "sel" : ""}" data-coin="${c.outpoint}"><b>${sats(c.value)} sats</b>${c.value === exact ? ' <span class="good">★ EXACT</span>' : ""}
+      <span class="faint">${c.confirmations} conf${c.label ? " · " + c.label : ""} · ${esc(c.address.slice(0, 10))}…${esc(c.address.slice(-6))}</span></div>`).join("");
+  if (chosen.length) {
+    const total = (st.coins || []).filter((c) => chosen.includes(c.outpoint)).reduce((a, c) => a + c.value, 0);
+    const ch = seatChange(total, amount, rate, t, chosen.length);
+    h += `<p class="${ch === null ? "warn" : "good"}">${chosen.length} coin(s), ${sats(total)} sats → ` + (ch === null ? `${sats(amount + feeNoChange(rate, t, chosen.length) - total)} sats short`
+      : ch === 0 ? (total === exact ? "★ exact: no change" : `no change, ${sats(total - amount - feeNoChange(rate, t, chosen.length))} extra to the miners`)
+      : `${sats(amount)} mixed + ${sats(ch)} change · fee ${sats(total - amount - ch)}`) + `</p>`;
+    if (ch > 0) h += `<p class="warn">Tip: an exact coin of ${sats(exact)} sats joins with no change at all, so nothing ties your mixed output to anything.</p>`;
+  }
+  return h;
 }
+const pickOk = () => {
+  if (!joining || !chosen.length) return false;
+  const total = (st.coins || []).filter((c) => chosen.includes(c.outpoint)).reduce((a, c) => a + c.value, 0);
+  return seatChange(total, joining.amount, joining.feeRate, joining.script, chosen.length) !== null;
+};
 
-// The perfect coin for a pool: a payment to yourself of exactly amount + the no-change fee share.
-function exactButton(amount, rate) {
-  const exact = amount + feeNoChange(rate);
-  if ((st.coins || []).some((c) => c.value === exact && !c.inRound)) return "";
-  return `<button class="ghost" id="exact" data-exact="${exact}">＋ PREPARE AN EXACT COIN OF ${sats(exact)} SATS</button>`;
+// The perfect coin for a pool: a payment to yourself of exactly amount + the no-change fee share, of the pool's type.
+function exactButton(amount, rate, t) {
+  const exact = amount + feeNoChange(rate, t, 1);
+  if ((st.coins || []).some((c) => c.value === exact && c.type === t && !c.inRound)) return "";
+  return `<button class="ghost" id="exact" data-exact="${exact}" data-type="${t}">＋ PREPARE AN EXACT COIN OF ${sats(exact)} SATS</button>`;
 }
 
 function sendPanel() {
   const sd = sending;
   const coins = (st.coins || []).filter((c) => !c.inRound);
   let h = `<div class="panel"><div class="label">${sd.exact ? "Exact coin · " + sats(sd.amount) + " sats to yourself" : "Send"}</div>`;
-  if (sd.exact) h += `<p class="faint">A payment to a fresh address of this wallet. After one confirmation it joins with no change. Mixed coins are left out on purpose.</p>`;
+  if (sd.exact) h += `<p class="faint">A payment to a fresh ${kind(sd.type)} address of this wallet (<code>${esc(sd.address.slice(0, 10))}…${esc(sd.address.slice(-6))}</code>). After one confirmation it joins with no change. Pay it with any of your coins, bc1q and bc1p alike; mixed coins are left out on purpose.</p>`;
   h += `<p class="faint">Tick the coins to spend (coin control). Never spend a mixed coin with other coins: that links them again.</p>`;
   h += coins.map((c) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" style="width:auto" data-sc="${c.outpoint}" ${sd.coins.includes(c.outpoint) ? "checked" : ""}>
-      <span><b>${sats(c.value)}</b> sats <span class="faint">${c.confirmations} conf${c.label ? " · <span class='" + (c.label === "mixed" ? "good" : "muted") + "'>" + c.label + "</span>" : ""} · ${esc(c.address.slice(0, 10))}…</span></span></label>`).join("");
+      <span><b>${sats(c.value)}</b> sats ${badge(c.type)} <span class="faint">${c.confirmations} conf${c.label ? " · <span class='" + (c.label === "mixed" ? "good" : "muted") + "'>" + c.label + "</span>" : ""} · ${esc(c.address.slice(0, 10))}…${esc(c.address.slice(-6))}</span></span></label>`).join("");
   if (!sd.exact) h += `<label>to address</label><input id="s-addr" value="${esc(sd.address || "")}" placeholder="bc1…">
     <label>amount in sats (empty = everything ticked, less the fee)</label><input id="s-amount" value="${sd.amount || ""}">`;
   h += `<label>fee (sat/vB)${sd.suggested ? " · your node suggests " + sd.suggested.toFixed(1) : " · your node has no estimate (quiet mempool)"}</label><input id="s-rate" value="${sd.feeRate}">`;
@@ -160,24 +184,30 @@ function homeScreen() {
   if (msg) h += `<div class="panel warn">${esc(msg)} <button class="ghost" id="msgok">ok</button></div>`;
   h += `<div class="panel"><div class="label">Wallet</div><div class="big">${sats(st.balance || 0)} <span style="font-size:18px">sats</span></div>
     <p class="faint">height ${st.height} · ${st.scannedAt ? "scanned " + new Date(st.scannedAt).toLocaleTimeString() : "scanning the UTXO set… (can take a minute)"} · relay ${esc(st.relay)}</p>
-    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE ADDRESS</button><button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
+    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE bc1q</button>${st.taproot ? `<button class="soft" id="recvtr">RECEIVE bc1p</button>` : ""}<button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh ${kind(received.type)} address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
   if (sending) h += sendPanel();
   else if (joining) {
     h += `<div class="panel"><div class="label">${joining.create ? "Open a pool" : "Join · " + sats(joining.amount) + " sats"}</div>`;
-    if (joining.create) h += `<div class="row"><div><label>amount per person (sats)</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
+    if (joining.create) h += `<label>address type: every coin, mixed output and change of the pool is of it</label>
+      <select id="c-type"><option value="p2wpkh" ${joining.script === "p2wpkh" ? "selected" : ""}>Native SegWit (bc1q)</option>${st.taproot ? `<option value="p2tr" ${joining.script === "p2tr" ? "selected" : ""}>Taproot (bc1p)</option>` : ""}</select>
+      <div class="row"><div><label>amount per person (sats)</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
       <div class="row"><div><label>fewest people</label><input id="c-min" value="2"></div><div><label>most people</label><input id="c-max" value="5"></div><div><label>open for (hours)</label><input id="c-hours" value="6"></div></div>
+      <label>most coins per person (1–10)</label><input id="c-inputs" value="${joining.maxInputs}">
+      <p class="small">${joining.script === "p2wpkh" && joining.maxInputs === 1 ? "One native SegWit coin each: older Kilowallet and Kilojoin versions can join too." : "Only Kilowallet 0.27+ and Kilojoin 0.5+ see this pool."}</p>
       <label>password (optional: makes it private 🔒)</label><input id="c-pw">`;
     else if (joining.private) h += `<label>🔒 pool password</label><input id="c-pw">`;
-    h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate))} sats with change, ${sats(feeNoChange(joining.feeRate))} without. Pick ONE confirmed coin:</p>
-      <div id="coins">${coinPicker(joining.amount, joining.feeRate)}</div>${exactButton(joining.amount, joining.feeRate)}
-      <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${chosen ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
+    h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate, joining.script))} sats with change, ${sats(feeNoChange(joining.feeRate, joining.script))} without, with one coin; each extra coin adds ${sats(Math.ceil(joining.feeRate * inVb(joining.script)))}.</p>
+      <div id="coins">${coinPicker(joining.amount, joining.feeRate, joining.script, joining.maxInputs)}</div>${exactButton(joining.amount, joining.feeRate, joining.script)}
+      <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${pickOk() ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
   } else h += `<button id="create">＋ OPEN A POOL</button>`;
   if (mine.length) h += `<div class="label" style="margin-top:18px">Your pools</div>` + mine.map(myPool).join("");
   h += `<div class="row" style="margin-top:18px"><div class="label">Open pools</div><button class="ghost" id="refresh" style="flex:0">refresh</button></div>`;
   h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${sats(t.amount)} sats</b><br>
+      <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}</span><br>
       <span class="faint">${t.peers}/${t.maxPeers} people (min ${t.minPeers}) · ${t.feeRate} sat/vB · closes in ${left(t.expiresAt)}<br>
-      costs you ${sats(t.feeWithChange)} sats (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span></div>
-      <button class="soft" data-join="${t.id}" style="flex:0">JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
+      costs you ${sats(t.feeWithChange)} sats with one coin (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span>
+      ${t.script === "p2tr" && !st.taproot ? `<br><span class="warn">Unlock Kilojoin again to set up its Taproot account.</span>` : ""}</div>
+      <button class="soft" data-join="${t.id}" style="flex:0" ${t.script === "p2tr" && !st.taproot ? "disabled" : ""}>JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
   h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label>
     <p class="small">Also to Telegram, with sound, through your own bot: make one with @BotFather, send it any message, and put its token and your chat id here (@userinfobot tells you your id).</p>
     <input id="tgToken" placeholder="${st.telegram && st.telegram.telegram_set ? "bot token (saved; type to replace)" : "bot token"}" autocomplete="off">
@@ -197,6 +227,7 @@ function bind() {
   on("#scan", async () => { $("#scan").disabled = true; $("#scan").textContent = "scanning…"; st = await api("/api/scan", {}); homeScreen(); });
   // The address stays on screen (the 5-second refresh redraws the page) until hidden.
   on("#recv", async () => { received = await api("/api/receive"); copied = false; homeScreen(); });
+  on("#recvtr", async () => { received = await api("/api/receive?type=p2tr"); copied = false; homeScreen(); });
   on("#hideaddr", () => { received = null; homeScreen(); });
   on("#copy", async () => {
     try { await navigator.clipboard.writeText(received.address); }
@@ -205,14 +236,14 @@ function bind() {
   });
   on("#send", () => startSend());
   on("#exact", async () => {
-    const exact = parseInt($("#exact").dataset.exact);
-    const r = await api("/api/receive");
-    // Pay for it with unmixed coins only, the biggest first, until they cover it.
+    const exact = parseInt($("#exact").dataset.exact), t = $("#exact").dataset.type;
+    const r = await api("/api/receive" + (t === "p2tr" ? "?type=p2tr" : ""));
+    // Suggested: unmixed coins of either type, the biggest first, until they cover it. Change them in the coin control.
     const pool = (st.coins || []).filter((c) => !c.inRound && c.label !== "mixed" && c.confirmations > 0).sort((a, b) => b.value - a.value);
     const pick = []; let sum = 0;
     for (const c of pool) { if (sum >= exact + 500) break; pick.push(c.outpoint); sum += c.value; }
-    joining = null; chosen = null;
-    await startSend({ exact: true, address: r.address, amount: String(exact), coins: pick });
+    joining = null; chosen = [];
+    await startSend({ exact: true, type: t, address: r.address, amount: String(exact), coins: pick });
   });
   on("#s-cancel", () => { sending = null; homeScreen(); });
   on("#s-preview", async () => { readSend(); try { sending.preview = await api("/api/send/preview", sendBody()); } catch (e) { msg = e.message; } homeScreen(); });
@@ -226,18 +257,25 @@ function bind() {
     readSend(); if (sending.preview) { sending.preview = null; homeScreen(); }
   }));
   on("#refresh", async () => { pools = await api("/api/pools"); homeScreen(); });
-  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 1 }; chosen = null; homeScreen(); });
-  on("#cancel", () => { joining = null; chosen = null; homeScreen(); });
-  document.querySelectorAll("[data-join]").forEach((b) => (b.onclick = () => { const t = pools.find((p) => p.id === b.dataset.join); joining = { create: false, id: t.id, amount: t.amount, feeRate: t.feeRate, private: t.private }; chosen = null; homeScreen(); }));
-  document.querySelectorAll("[data-coin]").forEach((d) => (d.onclick = () => { chosen = d.dataset.coin; homeScreen(); }));
-  if (joining && joining.create) ["#c-amount", "#c-rate"].forEach((id) => ($(id).onchange = () => {
-    joining.amount = Math.max(MIN, Math.min(MAX, parseInt($("#c-amount").value) || MIN)); joining.feeRate = Math.max(1, parseFloat($("#c-rate").value) || 2); chosen = null; homeScreen(); }));
+  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 1, script: "p2wpkh", maxInputs: 5 }; chosen = []; homeScreen(); });
+  on("#cancel", () => { joining = null; chosen = []; homeScreen(); });
+  document.querySelectorAll("[data-join]").forEach((b) => (b.onclick = () => { const t = pools.find((p) => p.id === b.dataset.join); joining = { create: false, id: t.id, amount: t.amount, feeRate: t.feeRate, private: t.private, script: t.script, maxInputs: t.maxInputs }; chosen = []; homeScreen(); }));
+  document.querySelectorAll("[data-coin]").forEach((d) => (d.onclick = () => {
+    const op = d.dataset.coin;
+    if (chosen.includes(op)) chosen = chosen.filter((x) => x !== op);
+    else if (joining.maxInputs > 1) { if (chosen.length < joining.maxInputs) chosen = chosen.concat(op); }
+    else chosen = [op];
+    homeScreen();
+  }));
+  if (joining && joining.create) ["#c-amount", "#c-rate", "#c-type", "#c-inputs"].forEach((id) => ($(id).onchange = () => {
+    joining.amount = Math.max(MIN, Math.min(MAX, parseInt($("#c-amount").value) || MIN)); joining.feeRate = Math.max(1, parseFloat($("#c-rate").value) || 2);
+    joining.script = $("#c-type").value; joining.maxInputs = Math.max(1, Math.min(10, parseInt($("#c-inputs").value) || 1)); chosen = []; homeScreen(); }));
   on("#confirm", async () => {
     try {
-      if (joining.create) await api("/api/create", { coin: chosen, amount: joining.amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
+      if (joining.create) await api("/api/create", { coins: chosen, script: joining.script, maxInputs: joining.maxInputs, amount: joining.amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
         maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value });
-      else await api("/api/join", { pool: joining.id, coin: chosen, password: $("#c-pw") ? $("#c-pw").value : "" });
-      joining = null; chosen = null; await load();
+      else await api("/api/join", { pool: joining.id, coins: chosen, password: $("#c-pw") ? $("#c-pw").value : "" });
+      joining = null; chosen = []; await load();
     } catch (e) { msg = e.message; homeScreen(); }
   });
   document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => {

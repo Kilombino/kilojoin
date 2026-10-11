@@ -6,7 +6,7 @@ Coinjoin on BTC (the BLAKE2b chain) from your own node, in the same pools as the
 - Same protocol and same code as the app: Kilowallet is a git submodule, and its
   `coinjoin/` and `crypto/` packages are compiled straight into this server.
 - Same relay, `wss://relay.kilombino.com`, so servers and phones meet in the same pools.
-- A web page to import or create a BIP-39 wallet (BIP84), receive, send with coin control,
+- A web page to import or create a BIP-39 wallet (native SegWit BIP84 and Taproot BIP86 accounts, both always scanned), receive on either, send with coin control,
   prepare an exact coin for a pool, open or join pools, vote and sign. Coins are labelled
   "mixed" (a coinjoin output) or "change", and a send that would link a mixed coin to
   others asks first. Spends are signed with the unified sighash (0x21), like Kilowallet. The words are stored encrypted with your password
@@ -19,7 +19,7 @@ On StartOS, install it from the Kilombino Registry (package `kilojoin`, wrapper 
 
 ## Protocol
 
-[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1 for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
+[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1 and v2 (Taproot pools, several coins per person) for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
 
 ## Build and run
 

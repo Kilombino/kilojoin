@@ -20,8 +20,10 @@ object Spend {
         val amount: Long, val change: Long, val fee: Long, val vbytes: Int, val feeRate: Double,
     )
 
-    // Virtual sizes: P2WPKH input 68, P2WPKH output 31, any output 9 + script, overhead 10.5.
-    private fun vsize(inputs: Int, outScripts: List<Int>): Double = 10.5 + 68.0 * inputs + outScripts.sumOf { 9.0 + it }
+    // Virtual sizes: P2WPKH input 68, Taproot key-path input 57.75 (with the unified hash byte),
+    // any output 9 + script, overhead 10.5.
+    private fun vsize(inputs: Int, outScripts: List<Int>, taprootIn: Int = 0): Double =
+        10.5 + 68.0 * (inputs - taprootIn) + 57.75 * taprootIn + outScripts.sumOf { 9.0 + it }
 
     /**
      * The transaction to send [amount] (all of the coins, less the fee, when null) to [address],
@@ -29,31 +31,32 @@ object Spend {
      */
     fun plan(coins: List<Wallet.Coin>, address: String, amount: Long?, feeRate: Double, changeScript: ByteArray): Draft {
         require(coins.isNotEmpty()) { "Tick at least one coin." }
+        val tr = coins.count { it.type == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR }
         require(feeRate in 0.1..1000.0) { "The fee rate must be between 0.1 and 1000 sat/vB." }
         val to = runCatching { Address.decodeToScriptPubKey(address.trim()) }.getOrElse { error("That is not a valid address.") }
         val sum = coins.sumOf { it.value }
         if (amount == null) {
-            val fee = ceil(feeRate * vsize(coins.size, listOf(to.size))).toLong()
+            val fee = ceil(feeRate * vsize(coins.size, listOf(to.size), tr)).toLong()
             val send = sum - fee
             require(send > DUST) { "These coins do not cover the fee." }
-            return Draft(coins, to, address.trim(), send, 0, fee, ceil(vsize(coins.size, listOf(to.size))).toInt(), feeRate)
+            return Draft(coins, to, address.trim(), send, 0, fee, ceil(vsize(coins.size, listOf(to.size), tr)).toInt(), feeRate)
         }
         require(amount > DUST) { "The amount is too small to send." }
-        val feeWith = ceil(feeRate * vsize(coins.size, listOf(to.size, changeScript.size))).toLong()
+        val feeWith = ceil(feeRate * vsize(coins.size, listOf(to.size, changeScript.size), tr)).toLong()
         val change = sum - amount - feeWith
         if (change >= DUST) return Draft(coins, to, address.trim(), amount, change, feeWith,
-            ceil(vsize(coins.size, listOf(to.size, changeScript.size))).toInt(), feeRate)
-        val feeNo = ceil(feeRate * vsize(coins.size, listOf(to.size))).toLong()
+            ceil(vsize(coins.size, listOf(to.size, changeScript.size), tr)).toInt(), feeRate)
+        val feeNo = ceil(feeRate * vsize(coins.size, listOf(to.size), tr)).toLong()
         require(sum - amount >= feeNo) { "These coins do not cover ${amount} sats plus the fee." }
         // Too little left for a change output: it goes to the miners.
-        return Draft(coins, to, address.trim(), amount, 0, sum - amount, ceil(vsize(coins.size, listOf(to.size))).toInt(), feeRate)
+        return Draft(coins, to, address.trim(), amount, 0, sum - amount, ceil(vsize(coins.size, listOf(to.size), tr)).toInt(), feeRate)
     }
 
     fun sign(secret: Vault.Secret, d: Draft, changeScript: ByteArray): TxBuilder.Signed {
         val master = Wallet.master(secret)
         val inputs = d.coins.map { c ->
             val k = Bip32Priv.derivePath(master, c.path)
-            TxBuilder.Input(c.txid, c.vout, c.value, k.key, k.publicKey(), 0xfffffffdL)
+            TxBuilder.Input(c.txid, c.vout, c.value, k.key, k.publicKey(), 0xfffffffdL, c.type)
         }
         val outputs = buildList {
             add(TxBuilder.Output(d.toScript, d.amount))

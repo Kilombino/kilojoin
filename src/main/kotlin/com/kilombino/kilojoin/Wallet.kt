@@ -11,19 +11,22 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * A native SegWit (BIP-84, m/84'/0'/0') wallet seen through the node: its coins come from
- * `scantxoutset` over the account's two branches, so the node needs no wallet of its own.
- * Fresh addresses are handed out from a persisted counter, never reused.
+ * One account of the seed seen through the node: native SegWit (BIP-84, m/84'/0'/0') or, with
+ * [taproot], Taproot (BIP-86, m/86'/0'/0'). Its coins come from `scantxoutset` over the
+ * account's two branches, so the node needs no wallet of its own. Fresh addresses are handed
+ * out from a persisted counter, never reused.
  */
-class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
-    private val stateFile = File(dir, "wallet.json")
+class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String, val taproot: Boolean = false) {
+    private val stateFile = File(dir, if (taproot) "wallet-tr.json" else "wallet.json")
+    val type: ScriptType = if (taproot) ScriptType.P2TR else ScriptType.P2WPKH
     private val account = Bip32.parseExtendedPubKey(xpub)
     /** The key as the node's descriptors want it: xpub on mainnet, tpub on test networks. */
     private val descKey = if (testnet) toVersion(xpub, 0x043587CF) else xpub
 
-    data class Coin(val txid: String, val vout: Int, val value: Long, val height: Int, val branch: Int, val index: Int, val address: String) {
+    data class Coin(val txid: String, val vout: Int, val value: Long, val height: Int, val branch: Int, val index: Int, val address: String,
+                    val type: ScriptType = ScriptType.P2WPKH) {
         val outpoint get() = "$txid:$vout"
-        val path get() = "m/84'/0'/0'/$branch/$index"
+        val path get() = "m/${if (type == ScriptType.P2TR) 86 else 84}'/0'/0'/$branch/$index"
     }
 
     @Volatile var coins: List<Coin> = emptyList(); private set
@@ -40,8 +43,8 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
     }
 
     fun pubkey(branch: Int, index: Int): ByteArray = Bip32.derivePath(account, branch, index).pubkey()
-    fun address(branch: Int, index: Int): String = Address.encode(pubkey(branch, index), ScriptType.P2WPKH)
-    fun script(branch: Int, index: Int): ByteArray = Address.scriptPubKey(pubkey(branch, index), ScriptType.P2WPKH)
+    fun address(branch: Int, index: Int): String = Address.encode(pubkey(branch, index), type)
+    fun script(branch: Int, index: Int): ByteArray = Address.scriptPubKey(pubkey(branch, index), type)
 
     /** A fresh address on [branch] (0 receive, 1 change), reserved so nothing else gets it. */
     @Synchronized
@@ -63,7 +66,7 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
     fun scan(gap: Int = 50) {
         val desc = JSONArray()
         val range = mapOf(0 to top(0) + gap, 1 to top(1) + gap)
-        for ((b, n) in range) desc.put(JSONObject().put("desc", "wpkh($descKey/$b/*)").put("range", n))
+        for ((b, n) in range) desc.put(JSONObject().put("desc", "${if (taproot) "tr" else "wpkh"}($descKey/$b/*)").put("range", n))
         val r = rpc.call("scantxoutset", "start", desc, timeoutMs = 600_000) as JSONObject
         val byScript = HashMap<String, Pair<Int, Int>>()
         for ((b, n) in range) for (i in 0..n) byScript[script(b, i).toHex()] = b to i
@@ -73,7 +76,7 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
             val o = u.getJSONObject(k)
             val (b, i) = byScript[o.getString("scriptPubKey")] ?: continue
             found += Coin(o.getString("txid"), o.getInt("vout"), Math.round(o.getDouble("amount") * 1e8),
-                o.optInt("height"), b, i, address(b, i))
+                o.optInt("height"), b, i, address(b, i), type)
             bump(b, i + 1)
         }
         tip = r.optInt("height", rpc.height())
@@ -88,6 +91,9 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String) {
 
         /** The BIP-84 account key as a plain "xpub", the prefix the node's descriptors accept. */
         fun xpubFor(secret: Vault.Secret): String = toXpub(Bip32Priv.accountXpub(master(secret), purpose = 84, account = 0))
+
+        /** The BIP-86 (Taproot) account key, also as a plain "xpub". */
+        fun taprootXpubFor(secret: Vault.Secret): String = toXpub(Bip32Priv.accountXpub(master(secret), purpose = 86, account = 0))
 
         /** Set for a regtest/testnet node (KILOJOIN_NETWORK not "blake2b"). */
         @Volatile var testnet = false

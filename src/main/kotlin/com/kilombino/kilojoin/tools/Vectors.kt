@@ -50,7 +50,7 @@ fun main() {
     val changeA = CoinjoinTx.change(coinA.value, amount, feeRate)!!
     val changeB = CoinjoinTx.change(coinB.value, amount, feeRate)!!
     val ownMsg = CoinjoinTx.ownershipMessage(poolId, joinPubB, coinB)
-    val chMsg = Protocol.changeMessage(poolId, coinB, chB, changeB)
+    val chMsg = Protocol.changeMessage(poolId, listOf(coinB), chB, changeB)
     out.put("join", JSONObject()
         .put("join_secret", joinKeyB.toString(16).padStart(64, '0')).put("join_pub", joinPubB)
         .put("coin", Protocol.coinJson(coinB)).put("coin_secret", kb.toString(16).padStart(64, '0'))

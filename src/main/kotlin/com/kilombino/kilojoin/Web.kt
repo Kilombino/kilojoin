@@ -5,6 +5,7 @@ import com.kilombino.pyblockwatch.coinjoin.PoolSession
 import com.kilombino.pyblockwatch.coinjoin.Protocol
 import com.kilombino.pyblockwatch.crypto.Bip39
 import com.kilombino.pyblockwatch.crypto.Hashes.toHex
+import com.kilombino.pyblockwatch.crypto.ScriptType
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import org.json.JSONArray
@@ -25,14 +26,31 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
     @Volatile private var secret: Vault.Secret? = null
     @Volatile private var token: String? = null
     @Volatile private var wallet: Wallet? = null
+    /** The seed's Taproot (BIP-86) account, for Taproot pools; set up at the first unlock after 0.5.0. */
+    @Volatile private var walletTr: Wallet? = null
+    private fun wallets(): List<Wallet> = listOfNotNull(wallet, walletTr)
+    private fun walletFor(t: ScriptType): Wallet =
+        (if (t == ScriptType.P2TR) walletTr else wallet) ?: error("unlock Kilojoin once so it can work out its Taproot account")
+    private fun allCoins(): List<Wallet.Coin> = wallets().flatMap { it.coins }.sortedByDescending { it.value }
+    private fun scriptOf(c: Wallet.Coin): String = walletFor(c.type).script(c.branch, c.index).toHex()
+
+    /** Both accounts from the words (BIP-84 and BIP-86), remembered by their public keys. */
+    private fun openWallets(sec: Vault.Secret) {
+        if (wallet == null) { val x = Wallet.xpubFor(sec); engine.setSetting("xpub", x); wallet = Wallet(dir, rpc, x) }
+        if (walletTr == null) {
+            val x = Wallet.taprootXpubFor(sec); engine.setSetting("xpub_tr", x)
+            walletTr = Wallet(dir, rpc, x, taproot = true).also { w -> Thread { runCatching { w.scan() } }.start() }
+        }
+    }
     @Volatile private var pools: List<Protocol.Terms> = emptyList()
     private val server = HttpServer.create(InetSocketAddress(port), 0)
     private val rnd = SecureRandom()
 
     init {
-        engine = Engine(dir, rpc) { wallet }
+        engine = Engine(dir, rpc) { wallets() }
         engine.secretProvider = { secret }
         engine.settings().optString("xpub").takeIf { it.isNotEmpty() }?.let { wallet = Wallet(dir, rpc, it) }
+        engine.settings().optString("xpub_tr").takeIf { it.isNotEmpty() }?.let { walletTr = Wallet(dir, rpc, it, taproot = true) }
         engine.load(); engine.startAll(); engine.startPoolWatcher()
         server.executor = Executors.newFixedThreadPool(8)
         server.createContext("/") { ex -> runCatching { route(ex) }.onFailure { e -> reply(ex, 500, err(e.message ?: "error")) } }
@@ -40,10 +58,10 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
 
     fun start() {
         server.start()
-        Thread { runCatching { wallet?.scan() } }.start()
+        Thread { wallets().forEach { runCatching { it.scan() } } }.start()
         // Keep the balance current without a click: every 10 minutes (the UTXO scan is cheap).
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(
-            { runCatching { wallet?.scan() } }, 10, 10, java.util.concurrent.TimeUnit.MINUTES)
+            { wallets().forEach { runCatching { it.scan() } } }, 10, 10, java.util.concurrent.TimeUnit.MINUTES)
     }
     val events get() = engine.events
     fun onEvent(f: (Engine.Event) -> Unit) { engine.onEvent = f }
@@ -100,8 +118,13 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         when (p) {
             "/api/status" -> reply(ex, 200, status())
             "/api/lock" -> { secret = null; token = null; reply(ex, 200, ok()) }
-            "/api/scan" -> { w?.scan(); reply(ex, 200, status()) }
-            "/api/receive" -> { val (i, a) = w!!.receive(); reply(ex, 200, JSONObject().put("index", i).put("address", a).put("script", w.script(0, i).toHex())) }
+            "/api/scan" -> { wallets().forEach { it.scan() }; reply(ex, 200, status()) }
+            "/api/receive" -> {
+                val rw = walletFor(if (ex.requestURI.query?.contains("type=p2tr") == true) ScriptType.P2TR else ScriptType.P2WPKH)
+                val (i, a) = rw.receive()
+                reply(ex, 200, JSONObject().put("index", i).put("address", a).put("script", rw.script(0, i).toHex())
+                    .put("type", Protocol.scriptName(rw.type)))
+            }
             "/api/pools" -> { pools = engine.fetchPools(); reply(ex, 200, JSONArray(pools.map { termsJson(it) })) }
             "/api/events" -> reply(ex, 200, JSONArray(engine.events.map { eventJson(it) }))
             "/api/settings" -> {
@@ -116,15 +139,17 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                 reply(ex, if (r.isSuccess) 200 else 400, if (r.isSuccess) ok() else err(r.exceptionOrNull()?.message ?: "failed"))
             }
             "/api/create" -> {
-                val c = coin(w!!, b.getString("coin"))
-                val st = engine.create(s!!, w, c, b.getLong("amount"), b.getDouble("feeRate"), b.optInt("minPeers", 2),
-                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"))
+                val type = Protocol.parseScript(b.optString("script", "p2wpkh")) ?: error("unknown address type")
+                val pw = walletFor(type)
+                val cs = coins(pw, b)
+                val st = engine.create(s!!, pw, cs, b.getLong("amount"), b.getDouble("feeRate"), b.optInt("minPeers", 2),
+                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), b.optInt("maxInputs", 1))
                 reply(ex, 200, JSONObject().put("pool", st.poolId))
             }
             "/api/join" -> {
                 val t = pools.firstOrNull { it.id == b.getString("pool") } ?: error("that pool is no longer open")
-                val c = coin(w!!, b.getString("coin"))
-                engine.join(s!!, w, c, t, b.optString("password"))
+                val pw = walletFor(t.script)
+                engine.join(s!!, pw, coins(pw, b), t, b.optString("password"))
                 reply(ex, 200, ok())
             }
             "/api/fee" -> reply(ex, 200, JSONObject().put("suggested", rpc.feeEstimate() ?: JSONObject.NULL))
@@ -132,7 +157,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             "/api/send" -> {
                 val (d, warn) = draft(w!!, b)
                 require(warn == null || b.optBoolean("acceptWarning")) { warn!! }
-                val change = if (d.change > 0) w.fresh(1).second else w.nextChangeScript()
+                val change = if (d.change > 0) w!!.fresh(1).second else w!!.nextChangeScript()
                 val signed = Spend.sign(s!!, d, change)
                 val txid = rpc.call("sendrawtransaction", signed.rawHex) as String
                 Thread { runCatching { Thread.sleep(3000); w.scan() } }.start()
@@ -156,12 +181,12 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         val locked = engine.lockedOutpoints()
         val coins = picked.map { op ->
             require(op !in locked) { "A ticked coin is in a coinjoin round right now." }
-            w.coins.firstOrNull { it.outpoint == op } ?: error("A ticked coin is gone: scan again.")
+            allCoins().firstOrNull { it.outpoint == op } ?: error("A ticked coin is gone: scan again.")
         }
         val amount = b.optLong("amount", 0L).takeIf { it > 0 }
         val d = Spend.plan(coins, b.getString("address"), amount, b.getDouble("feeRate"), w.nextChangeScript())
         val mixed = engine.mixedScripts()
-        val nMixed = coins.count { w.script(it.branch, it.index).toHex() in mixed }
+        val nMixed = coins.count { scriptOf(it) in mixed }
         val warn = when {
             nMixed > 0 && coins.size > nMixed -> "You are spending mixed and unmixed coins together: anyone can link them again, which undoes the coinjoin."
             nMixed > 1 -> "You are spending several mixed coins together: they become linked to each other."
@@ -178,7 +203,15 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
 
     private fun coin(w: Wallet, outpoint: String): Wallet.Coin {
         require(outpoint !in engine.lockedOutpoints()) { "that coin is already in a round" }
-        return w.coins.firstOrNull { it.outpoint == outpoint } ?: error("coin not found: scan again")
+        return w.coins.firstOrNull { it.outpoint == outpoint }
+            ?: error(if (allCoins().any { it.outpoint == outpoint }) "that coin is not of the pool's address type" else "coin not found: scan again")
+    }
+
+    /** The coins a create/join asks for: `coins` (a list) or the older single `coin`, all from [w]. */
+    private fun coins(w: Wallet, b: JSONObject): List<Wallet.Coin> {
+        val ops = b.optJSONArray("coins")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: listOf(b.getString("coin"))
+        require(ops.isNotEmpty() && ops.toSet().size == ops.size) { "pick each coin once" }
+        return ops.map { coin(w, it) }
     }
 
     private fun newSession(): String {
@@ -199,9 +232,8 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         require(Bip39.isValid(words)) { "These words are not a valid BIP-39 seed (a word is wrong or out of order)." }
         vault.store(words, passphrase, password)
         val sec = Vault.Secret(words, passphrase)
-        val xpub = Wallet.xpubFor(sec)
-        engine.setSetting("xpub", xpub)
-        secret = sec; wallet = Wallet(dir, rpc, xpub)
+        secret = sec; wallet = null; walletTr = null
+        openWallets(sec)
         Thread { runCatching { wallet?.scan() } }.start()
         withCookie(ex, newSession())
         // The new words are shown ONCE, to be written down; imported ones are not echoed back.
@@ -215,7 +247,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             return reply(ex, 403, err("Wrong password."))
         }
         secret = sec
-        if (wallet == null) wallet = Wallet(dir, rpc, Wallet.xpubFor(sec))
+        openWallets(sec)
         withCookie(ex, newSession())
         reply(ex, 200, ok())
     }
@@ -232,21 +264,26 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
     private fun termsJson(t: Protocol.Terms) = JSONObject()
         .put("id", t.id).put("amount", t.amount).put("feeRate", t.feeRate).put("peers", t.peers)
         .put("minPeers", t.minPeers).put("maxPeers", t.maxPeers).put("expiresAt", t.expiresAt).put("private", t.private)
-        .put("feeWithChange", CoinjoinTx.feeShare(t.feeRate, true)).put("feeNoChange", CoinjoinTx.feeShare(t.feeRate, false))
+        .put("feeWithChange", CoinjoinTx.feeShare(t.feeRate, true, 1, t.script)).put("feeNoChange", CoinjoinTx.feeShare(t.feeRate, false, 1, t.script))
+        .put("script", Protocol.scriptName(t.script)).put("maxInputs", t.maxInputs).put("version", t.version)
+        .put("inputFee", kotlin.math.ceil(t.feeRate * CoinjoinTx.inputVb(t.script)).toLong())
 
     private fun status(): JSONObject {
-        val w = wallet
+        val ws = wallets()
         val locked = engine.lockedOutpoints()
         val o = JSONObject().put("setup", true).put("unlocked", secret != null)
             .put("height", runCatching { rpc.height() }.getOrDefault(0))
             .put("relay", Protocol.RELAY).put("notify_new_pools", engine.notifyNewPools)
             .put("auto_sign", engine.autoSign).put("telegram", settingsJson())
-        if (w != null) {
+        if (ws.isNotEmpty()) {
             val mixed = engine.mixedScripts()
-            o.put("balance", w.coins.sumOf { it.value }).put("scannedAt", w.scannedAt)
-            o.put("coins", JSONArray(w.coins.map { c ->
+            o.put("balance", ws.sumOf { w -> w.coins.sumOf { it.value } }).put("scannedAt", ws.minOf { it.scannedAt })
+            o.put("taproot", walletTr != null)
+            o.put("coins", JSONArray(allCoins().map { c ->
+                val w = walletFor(c.type)
                 JSONObject().put("outpoint", c.outpoint).put("value", c.value).put("address", c.address)
-                    .put("label", when { w.script(c.branch, c.index).toHex() in mixed -> "mixed"; c.branch == 1 -> "change"; else -> "" })
+                    .put("type", Protocol.scriptName(c.type))
+                    .put("label", when { scriptOf(c) in mixed -> "mixed"; c.branch == 1 -> "change"; else -> "" })
                     .put("confirmations", w.confirmations(c)).put("inRound", c.outpoint in locked)
             }))
         }
@@ -261,10 +298,11 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             .put("creator", st.creator).put("private", st.terms.private).put("phase", st.phase.name).put("reason", st.reason)
             .put("people", people).put("minPeers", st.terms.minPeers).put("maxPeers", st.terms.maxPeers)
             .put("expiresAt", st.terms.expiresAt).put("phaseDeadline", st.phaseDeadline).put("voteDeadline", st.voteDeadline)
-            .put("coinValue", st.seat.coin.value).put("change", st.seat.changeValue)
+            .put("coinValue", st.seat.inputValue).put("coins", st.seat.coins.size).put("change", st.seat.changeValue)
+            .put("script", Protocol.scriptName(st.terms.script))
             .put("iAsked", st.voteBy != null && st.voteBy == st.token?.let { Protocol.tokenHash(it) })
             .put("voted", st.votedOn != null && st.votedOn == st.voteId)
             .put("signed", st.postedSig).put("sigs", st.sigs.size).put("txid", st.txid ?: "")
-            .put("planFee", plan?.fee ?: 0).put("planPeople", plan?.coins?.size ?: 0)
+            .put("planFee", plan?.fee ?: 0).put("planPeople", st.round.size).put("planCoins", plan?.coins?.size ?: 0)
     }
 }

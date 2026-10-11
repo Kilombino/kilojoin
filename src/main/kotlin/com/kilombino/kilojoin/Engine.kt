@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
  * (persisted), lists the open pools, and records what happened as events for the web page and
  * for StartOS notifications.
  */
-class Engine(private val dir: File, private val rpc: Rpc, private val walletProvider: () -> Wallet?) {
+class Engine(private val dir: File, private val rpc: Rpc, private val walletProvider: () -> List<Wallet>) {
     private val sessionsFile = File(dir, "sessions.json")
     private val settingsFile = File(dir, "settings.json")
     private val sessions = ConcurrentHashMap<String, PoolSession>()
@@ -76,7 +76,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     }
 
     /** Rescan the wallet off the caller's thread (after a round goes out or confirms). */
-    private fun rescanSoon() { Thread { runCatching { walletProvider()?.scan() } }.start() }
+    private fun rescanSoon() { Thread { walletProvider().forEach { w -> runCatching { w.scan() } } }.start() }
 
     // ------------------------------------------------------------------ persistence
 
@@ -104,7 +104,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun session(id: String): PoolSession? = sessions[id]
     fun remove(id: String) { sessions.remove(id)?.stop(); persist() }
     fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done && it.state.phase != PoolSession.Phase.BROADCAST }
-        .map { it.state.seat.coin.outpoint }.toSet()
+        .flatMap { s -> s.state.seat.coins.map { it.outpoint } }.toSet()
 
     // ------------------------------------------------------------------ joining
 
@@ -115,31 +115,40 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         return s
     }
 
-    private fun pick(secret: Vault.Secret, w: Wallet, c: Wallet.Coin): Triple<CoinjoinTx.Coin, java.math.BigInteger, Pair<ByteArray, ByteArray>> {
-        val node = Bip32Priv.derivePath(Wallet.master(secret), c.path)
-        val coin = CoinjoinTx.Coin(c.txid, c.vout, c.value, node.publicKey())
-        val mix = w.fresh(0).second
-        val change = w.fresh(1).second
-        return Triple(coin, node.key, mix to change)
+    /** A seat's coins (all of [w]'s type) with their keys, and fresh mixed-output and change scripts from [w]. */
+    private class Picked(val coins: List<CoinjoinTx.Coin>, val keys: List<java.math.BigInteger>, val paths: List<String>,
+                         val mix: ByteArray, val change: ByteArray)
+
+    private fun pick(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>): Picked {
+        require(cs.isNotEmpty()) { "pick a coin" }
+        require(cs.all { it.type == w.type }) { "all the coins must be of the pool's address type" }
+        val master = Wallet.master(secret)
+        val nodes = cs.map { Bip32Priv.derivePath(master, it.path) }
+        val coins = cs.indices.map { CoinjoinTx.Coin(cs[it].txid, cs[it].vout, cs[it].value, nodes[it].publicKey(), w.type) }
+        return Picked(coins, nodes.map { it.key }, cs.map { it.path }, w.fresh(0).second, w.fresh(1).second)
     }
 
-    fun create(secret: Vault.Secret, w: Wallet, c: Wallet.Coin, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
-               hours: Int, password: String?): PoolSession.State {
-        val (terms, poolSecret) = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty())
-        val (coin, key, scripts) = pick(secret, w, c)
-        return add(PoolSession.newState(terms, true, poolSecret, coin, key, c.path, scripts.first, scripts.second,
+    fun create(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
+               hours: Int, password: String?, maxInputs: Int = 1): PoolSession.State {
+        val (terms, poolSecret) = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
+            w.type, maxInputs)
+        val p = pick(secret, w, cs)
+        return add(PoolSession.newState(terms, true, poolSecret, p.coins, p.keys, p.paths, p.mix, p.change,
             password?.ifEmpty { null })).state
     }
 
-    fun join(secret: Vault.Secret, w: Wallet, c: Wallet.Coin, terms: Protocol.Terms, password: String?): PoolSession.State {
-        val (coin, key, scripts) = pick(secret, w, c)
-        return add(PoolSession.newState(terms, false, null, coin, key, c.path, scripts.first, scripts.second,
+    fun join(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, terms: Protocol.Terms, password: String?): PoolSession.State {
+        require(w.type == terms.script) { "this pool takes ${if (terms.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) "Taproot" else "native SegWit"} coins only" }
+        require(cs.size <= terms.maxInputs) { "this pool takes at most ${terms.maxInputs} coin(s) per person" }
+        val p = pick(secret, w, cs)
+        return add(PoolSession.newState(terms, false, null, p.coins, p.keys, p.paths, p.mix, p.change,
             password?.ifEmpty { null })).state
     }
 
     fun sign(secret: Vault.Secret, poolId: String) {
         val s = sessions[poolId] ?: error("no such pool")
-        s.sign(Bip32Priv.derivePath(Wallet.master(secret), s.state.coinPath).key)
+        val master = Wallet.master(secret)
+        s.sign(s.state.coinPaths.map { Bip32Priv.derivePath(master, it).key })
     }
 
     // ------------------------------------------------------------------ open pools
@@ -172,7 +181,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 val pools = fetchPools(86400).filter { it.createdAt > last && it.id !in sessions.keys && !it.private }
                 pools.maxOfOrNull { it.createdAt }?.let { setSetting("last_pool_seen", it) }
                 pools.take(3).forEach { t -> emit("New coinjoin pool",
-                    "${sats(t.amount)} sats · ${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
+                    "${sats(t.amount)} sats${if (t.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) " · Taproot" else ""} · " +
+                        "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
             }
         }, 20, 300, TimeUnit.SECONDS)
     }
@@ -189,7 +199,9 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     private fun env(st: PoolSession.State): PoolSession.Env = object : PoolSession.Env {
         override fun coinUnspent(coin: CoinjoinTx.Coin): Boolean {
             val o = rpc.txOut(coin.txid, coin.vout) ?: return false
-            return Math.round(o.getDouble("value") * 1e8) == coin.value
+            // The coin's own script too: a coin claimed under another address type does not match.
+            return Math.round(o.getDouble("value") * 1e8) == coin.value &&
+                o.optJSONObject("scriptPubKey")?.optString("hex") == coin.script.toHex()
         }
         override fun broadcast(rawHex: String): String = rpc.call("sendrawtransaction", rawHex) as String
         override fun confirmations(txid: String): Int? {

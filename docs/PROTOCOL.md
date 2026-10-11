@@ -1,8 +1,8 @@
-# Kilojoin v1 — protocol
+# Kilojoin v1 and v2 — protocol
 
 Kilojoin is coinjoin for the BLAKE2b chain (BIP-110 + BLAKE2b proof of work). Nobody coordinates it and nobody holds funds: pools are announced on a Nostr relay, and the people in a pool talk through NIP-44 encrypted Nostr events. Each wallet builds the same transaction, checks its own output and change, and signs only its own input. The design follows Joinstr, adapted to how Kilowallet starts a round: people join an open pool, and once enough are in, anyone can ask to close it and the rest vote.
 
-This document describes v1 exactly as implemented in:
+This document describes v1 exactly as implemented in (and, in section 10, what v2 changes):
 
 - Kilowallet (Android): `app/src/main/java/com/kilombino/pyblockwatch/coinjoin/`
   - `Protocol.kt`: constants, messages, hashes
@@ -274,3 +274,63 @@ There is no Ark-specific code in Kilojoin yet.
 - **Change addresses** come from the participant's own wallet, so they are only as private as that wallet's address handling.
 
 Present it as experimental: correct for funds, modest for privacy against the relay.
+
+---
+
+## 10. Kilojoin v2 (Kilowallet 0.27, Kilojoin 0.5)
+
+v2 adds Taproot pools and several coins per person. Everything not listed here is as in v1.
+
+### Pool announcement
+
+- `"v": 2` and two more fields:
+  - `"script"`: `"p2wpkh"` or `"p2tr"`, the one address type of the round. Every input, mixed output and change of the round is of it.
+  - `"max_inputs"`: 1 to 10, the most coins one person may bring.
+- A v1 wallet only accepts `v = 1`, so it never lists a v2 pool. A v2 wallet lists both.
+- A native SegWit pool of one coin each is announced as **v1**, so older wallets can still join it. Taproot, or `max_inputs > 1`, makes it v2.
+
+### Coins and seats
+
+- A coin travels exactly as in v1 (`txid`, `vout`, `value`, `pubkey`, 33-byte compressed). For `p2tr`, `pubkey` is the BIP-86 internal key, and the coin's script is `OP_1 <32-byte x-only key tweaked as in BIP-86>`.
+- A seat carries `"coins"`: an array of one or more coins, all of the pool's type. It also keeps `"coin"` = the first one, for v1 readers. A one-coin seat has no `"coins"` field, exactly as in v1.
+- A coin can hold one seat only, and appear once in it.
+
+### Join request
+
+- `"proofs"`: one ownership signature per coin, in the order of `coins`, over the v1 ownership message of that coin. `"proof"` is still sent and is the first one.
+- `change_sig` is signed with the first coin's key. Its message is:
+  - for one coin, the v1 change message, unchanged;
+  - for several, `sha256("kilojoin/v2/change|<pool id>|<op1>,<op2>,…|<change script hex or empty>|<change value>")`, with the outpoints `txid:vout` in seat order.
+- The change script must be of the pool's type.
+- The creator checks every coin against the chain: unspent, the stated value, **and** the script that the pool's type gives for `pubkey`. A coin claimed under the wrong type does not match its script, and is refused.
+
+### Fees
+
+Per person, with `n` coins and the pool's type `t`:
+
+```
+in(p2wpkh) = 68     out(p2wpkh) = 31
+in(p2tr)   = 57.75  out(p2tr)   = 43      // 64-byte Schnorr + the 0x21 byte; P2TR output
+fee_share(rate, change, n, t) = ceil(rate × (in(t)·n + out(t) + (out(t) if change) + 10.5/2))
+change = Σ coins − denomination − fee_share(rate, true, n, t), if > 294; otherwise 0 (and the coins must cover fee_share(rate, false, n, t))
+```
+
+Checks before signing use the round's real input count: `fee ≥ floor(rate × vsize × 0.95)` and `fee ≤ Σ seats fee_share(rate, true, n_seat, t) + people × 295`.
+
+### Transaction
+
+- Inputs: every coin of every seat in the round, sorted by `(txid, vout)` as in v1. There is one mixed output per person, so there are at least as many inputs as mixed outputs, not exactly as many.
+- `plan()` also refuses coins of two types, and any output whose script is not of the pool's type.
+- An `output` message's script must match `^0014[0-9a-f]{40}$` for `p2wpkh` and `^5120[0-9a-f]{64}$` for `p2tr`.
+
+### Signatures
+
+- One `sig` message per coin, keyed by its outpoint.
+- `p2wpkh`: as in v1.
+- `p2tr`: key path. A BIP-340 Schnorr signature by the BIP-86 tweaked key over the **unified sighash with script type 2** (taproot key path, no annex), followed by the byte `0x21`, 65 bytes in all. It is verified against the x-only key in the coin's script.
+- A spend signed this way is valid only on the BLAKE2b chain, as in v1.
+
+Tested on a BLAKE2b regtest node over relay.kilombino.com:
+- Kilowallet↔Kilowallet: a Taproot pool, one person with two coins and one with one. A native SegWit coin passed off as Taproot was refused. The round was mined with 3 × 65-byte Schnorr witnesses and 4 P2TR outputs (356 vB).
+- Kilojoin↔Kilojoin: the same round shape, also mined.
+
