@@ -142,7 +142,7 @@ function sendPanel() {
   const sd = sending;
   const coins = (st.coins || []).filter((c) => !c.inRound);
   let h = `<div class="panel"><div class="label">${sd.exact ? "Exact coin · " + sats(sd.amount) + " sats to yourself" : "Send"}</div>`;
-  if (sd.exact) h += `<p class="faint">A payment to a fresh ${kind(sd.type)} address of this wallet (<code>${esc(sd.address.slice(0, 10))}…${esc(sd.address.slice(-6))}</code>). After one confirmation it joins with no change. Pay it with any of your coins, bc1q and bc1p alike; mixed coins are left out on purpose.</p>`;
+  if (sd.exact) h += `<p class="faint">A payment to a fresh ${kind(sd.type)} address of this wallet (<code>${esc(sd.address.slice(0, 10))}…${esc(sd.address.slice(-6))}</code>). After one confirmation it joins with no change${sd.after ? ", and Kilojoin " + (sd.after.create ? "opens the pool" : "joins the pool") + " with it by itself" : ""}. Pay it with any of your coins, bc1q and bc1p alike; mixed coins are left out on purpose.</p>`;
   h += `<p class="faint">Tick the coins to spend (coin control). Never spend a mixed coin with other coins: that links them again.</p>`;
   h += coins.map((c) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" style="width:auto" data-sc="${c.outpoint}" ${sd.coins.includes(c.outpoint) ? "checked" : ""}>
       <span><b>${sats(c.value)}</b> sats ${badge(c.type)} <span class="faint">${c.confirmations} conf${c.label ? " · <span class='" + (c.label === "mixed" ? "good" : "muted") + "'>" + c.label + "</span>" : ""} · ${esc(c.address.slice(0, 10))}…${esc(c.address.slice(-6))}</span></span></label>`).join("");
@@ -175,7 +175,8 @@ function readSend() {
   if ($("#s-amount")) sd.amount = $("#s-amount").value.replace(/\D/g, "");
   sd.feeRate = parseFloat($("#s-rate").value) || 1;
 }
-const sendBody = () => ({ coins: sending.coins, address: sending.address, amount: parseInt(sending.amount) || 0, feeRate: sending.feeRate });
+const sendBody = () => Object.assign({ coins: sending.coins, address: sending.address, amount: parseInt(sending.amount) || 0, feeRate: sending.feeRate },
+  sending.exact && sending.after ? { after: sending.after, exactIndex: sending.index, exactType: sending.type } : {});
 
 function homeScreen() {
   const mine = st.mine || [];
@@ -201,6 +202,7 @@ function homeScreen() {
       <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${pickOk() ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
   } else h += `<button id="create">＋ OPEN A POOL</button>`;
   if (mine.length) h += `<div class="label" style="margin-top:18px">Your pools</div>` + mine.map(myPool).join("");
+  (st.waitingExact || []).forEach((x) => { h += `<div class="panel"><div class="label">Waiting for the perfect coin</div><p class="faint">${sats(x.value)} sats to yourself: at its first confirmation it ${x.create ? "opens your pool" : "joins the pool"} by itself.</p></div>`; });
   h += `<div class="row" style="margin-top:18px"><div class="label">Open pools</div><button class="ghost" id="refresh" style="flex:0">refresh</button></div>`;
   h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${sats(t.amount)} sats</b><br>
       <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}</span><br>
@@ -215,7 +217,7 @@ function homeScreen() {
     <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span>
     <label style="margin-top:10px;display:block"><input type="checkbox" id="beep" style="width:auto" ${soundOn() ? "checked" : ""}> sound and a notification in this browser, while this page is open</label></div>`;
   h += `<div class="panel"><div class="label">Sign on its own</div><label><input type="checkbox" id="autoSign" style="width:auto" ${st.auto_sign ? "checked" : ""}> accept close requests and sign by itself</label>
-    <p class="small">So a round does not wait for you. It signs only when the final transaction checks out (your mixed output, your change and your share of the fee), and only while Kilojoin is unlocked; otherwise it does not sign and tells you why.</p></div>`;
+    <p class="small">Unlocking to open or join a pool is the only time it asks: the round goes on with this page closed, and signs only when the final transaction checks out (your mixed output, your change and your share of the fee). The keys of that round's coins stay in memory until it ends; if Kilojoin restarts, unlock it once to let it sign.</p></div>`;
   app.innerHTML = h;
   bind();
 }
@@ -242,8 +244,12 @@ function bind() {
     const pool = (st.coins || []).filter((c) => !c.inRound && c.label !== "mixed" && c.confirmations > 0).sort((a, b) => b.value - a.value);
     const pick = []; let sum = 0;
     for (const c of pool) { if (sum >= exact + 500) break; pick.push(c.outpoint); sum += c.value; }
+    // Once it confirms, Kilojoin joins this pool (or opens the one being set up) by itself.
+    const after = !joining ? null : joining.create ? { create: { amount: joining.amount, feeRate: joining.feeRate, script: joining.script, maxInputs: joining.maxInputs,
+        minPeers: parseInt($("#c-min").value) || 2, maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value } }
+      : { pool: joining.id, poolPassword: $("#c-pw") ? $("#c-pw").value : "" };
     joining = null; chosen = [];
-    await startSend({ exact: true, type: t, address: r.address, amount: String(exact), coins: pick });
+    await startSend({ exact: true, type: t, address: r.address, index: r.index, after, amount: String(exact), coins: pick });
   });
   on("#s-cancel", () => { sending = null; homeScreen(); });
   on("#s-preview", async () => { readSend(); try { sending.preview = await api("/api/send/preview", sendBody()); } catch (e) { msg = e.message; } homeScreen(); });

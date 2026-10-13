@@ -3,6 +3,7 @@ package com.kilombino.kilojoin
 import com.kilombino.pyblockwatch.coinjoin.CoinjoinTx
 import com.kilombino.pyblockwatch.coinjoin.PoolSession
 import com.kilombino.pyblockwatch.coinjoin.Protocol
+import com.kilombino.pyblockwatch.crypto.Bip32Priv
 import com.kilombino.pyblockwatch.crypto.Bip39
 import com.kilombino.pyblockwatch.crypto.Hashes.toHex
 import com.kilombino.pyblockwatch.crypto.ScriptType
@@ -160,6 +161,18 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                 val change = if (d.change > 0) w!!.fresh(1).second else w!!.nextChangeScript()
                 val signed = Spend.sign(s!!, d, change)
                 val txid = rpc.call("sendrawtransaction", signed.rawHex) as String
+                // The perfect coin of a pool: its key goes with it, so the pool goes on by itself at 1 confirmation.
+                b.optJSONObject("after")?.let { after -> runCatching {
+                    val t = Protocol.parseScript(b.optString("exactType", "p2wpkh")) ?: error("type")
+                    val i = b.getInt("exactIndex"); val ew = walletFor(t)
+                    require(ew.address(0, i) == d.toAddress) { "not the exact coin's address" }
+                    val raw = rpc.call("decoderawtransaction", signed.rawHex) as JSONObject
+                    val outs = raw.getJSONArray("vout")
+                    val vout = (0 until outs.length()).first { outs.getJSONObject(it).getJSONObject("scriptPubKey").getString("hex") == d.toScript.toHex() }
+                    val node = Bip32Priv.derivePath(Wallet.master(s), "m/${if (t == ScriptType.P2TR) 86 else 84}'/0'/0'/0/$i")
+                    engine.expectExact(Engine.AfterExact(txid, vout, d.amount, t, i, node, after.optString("pool").ifEmpty { null },
+                        after.optString("poolPassword").ifEmpty { null }, after.optJSONObject("create")))
+                } }
                 Thread { runCatching { Thread.sleep(3000); w.scan() } }.start()
                 reply(ex, 200, JSONObject().put("txid", txid))
             }
@@ -275,6 +288,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             .put("height", runCatching { rpc.height() }.getOrDefault(0))
             .put("relay", Protocol.RELAY).put("notify_new_pools", engine.notifyNewPools)
             .put("auto_sign", engine.autoSign).put("telegram", settingsJson())
+            .put("waitingExact", JSONArray(engine.waitingExact().map { JSONObject().put("value", it.value).put("create", it.create != null) }))
         if (ws.isNotEmpty()) {
             val mixed = engine.mixedScripts()
             o.put("balance", ws.sumOf { w -> w.coins.sumOf { it.value } }).put("scannedAt", ws.minOf { it.scannedAt })

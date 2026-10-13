@@ -39,8 +39,17 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun settings(): JSONObject = if (settingsFile.exists()) JSONObject(settingsFile.readText()) else JSONObject()
     fun setSetting(k: String, v: Any) { val o = settings(); o.put(k, v); settingsFile.writeText(o.toString()) }
     val notifyNewPools: Boolean get() = settings().optBoolean("notify_new_pools", true)
-    /** Accept close requests and sign by itself when the transaction checks out (off by default). */
-    val autoSign: Boolean get() = settings().optBoolean("auto_sign", false)
+    /**
+     * Accept close requests and sign by itself when the transaction checks out (on by default,
+     * as in the app): unlocking to open or join a pool is the only time it asks.
+     */
+    val autoSign: Boolean get() = settings().optBoolean("auto_sign", true)
+
+    /**
+     * Keys of the coins of each live round on its own, taken when it was opened or joined, so it
+     * signs even after Kilojoin is locked. Only in memory: after a restart it signs once unlocked.
+     */
+    private val roundKeys = ConcurrentHashMap<String, List<java.math.BigInteger>>()
 
     /** Telegram, through the user's own bot: every event also arrives there, with sound. */
     fun telegram(text: String): Result<Unit> = runCatching {
@@ -102,13 +111,14 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
 
     fun states(): List<PoolSession.State> = sessions.values.map { it.state }.sortedByDescending { it.created }
     fun session(id: String): PoolSession? = sessions[id]
-    fun remove(id: String) { sessions.remove(id)?.stop(); persist() }
+    fun remove(id: String) { sessions.remove(id)?.stop(); roundKeys.remove(id); persist() }
     fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done && it.state.phase != PoolSession.Phase.BROADCAST }
         .flatMap { s -> s.state.seat.coins.map { it.outpoint } }.toSet()
 
     // ------------------------------------------------------------------ joining
 
-    private fun add(st: PoolSession.State): PoolSession {
+    private fun add(st: PoolSession.State, keys: List<java.math.BigInteger>): PoolSession {
+        if (autoSign) roundKeys[st.poolId] = keys
         val s = PoolSession(env(st), st)
         sessions[st.poolId] = s; persist()
         Thread { runCatching { s.start() } }.start()
@@ -120,10 +130,14 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                          val mix: ByteArray, val change: ByteArray)
 
     private fun pick(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>): Picked {
+        val master = Wallet.master(secret)
+        return pickNodes(w, cs, cs.map { Bip32Priv.derivePath(master, it.path) })
+    }
+
+    private fun pickNodes(w: Wallet, cs: List<Wallet.Coin>, nodes: List<Bip32Priv.ExtendedPrivKey>): Picked {
         require(cs.isNotEmpty()) { "pick a coin" }
         require(cs.all { it.type == w.type }) { "all the coins must be of the pool's address type" }
-        val master = Wallet.master(secret)
-        val nodes = cs.map { Bip32Priv.derivePath(master, it.path) }
+        cs.indices.forEach { require(nodes[it].publicKey().contentEquals(w.pubkey(cs[it].branch, cs[it].index))) { "these words do not match this wallet's key" } }
         val coins = cs.indices.map { CoinjoinTx.Coin(cs[it].txid, cs[it].vout, cs[it].value, nodes[it].publicKey(), w.type) }
         return Picked(coins, nodes.map { it.key }, cs.map { it.path }, w.fresh(0).second, w.fresh(1).second)
     }
@@ -134,15 +148,59 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
             w.type, maxInputs)
         val p = pick(secret, w, cs)
         return add(PoolSession.newState(terms, true, poolSecret, p.coins, p.keys, p.paths, p.mix, p.change,
-            password?.ifEmpty { null })).state
+            password?.ifEmpty { null }), p.keys).state
     }
 
     fun join(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, terms: Protocol.Terms, password: String?): PoolSession.State {
         require(w.type == terms.script) { "this pool takes ${if (terms.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) "Taproot" else "native SegWit"} coins only" }
         require(cs.size <= terms.maxInputs) { "this pool takes at most ${terms.maxInputs} coin(s) per person" }
-        val p = pick(secret, w, cs)
+        return joinWith(pick(secret, w, cs), terms, password)
+    }
+
+    private fun joinWith(p: Picked, terms: Protocol.Terms, password: String?): PoolSession.State {
+        require(terms.id !in sessions.keys || sessions[terms.id]!!.done) { "you are already in this pool" }
         return add(PoolSession.newState(terms, false, null, p.coins, p.keys, p.paths, p.mix, p.change,
-            password?.ifEmpty { null })).state
+            password?.ifEmpty { null }), p.keys).state
+    }
+
+    // ------------------------------------------------------------------ the perfect coin, then the pool
+
+    /**
+     * A pool waiting for its perfect coin (output [vout] of [txid], a payment to ourselves). At its
+     * first confirmation the pool is joined, or opened, by itself with the coin's key, taken when
+     * the payment was signed. In memory only; after a restart the coin waits for a join by hand.
+     */
+    class AfterExact(val txid: String, val vout: Int, val value: Long, val type: com.kilombino.pyblockwatch.crypto.ScriptType,
+                     val index: Int, val node: Bip32Priv.ExtendedPrivKey, val poolId: String?, val poolPassword: String?,
+                     val create: JSONObject?, val since: Long = System.currentTimeMillis() / 1000)
+    private val afterExact = ConcurrentHashMap<String, AfterExact>()
+
+    fun expectExact(a: AfterExact) { afterExact["${a.txid}:${a.vout}"] = a }
+    fun waitingExact(): List<AfterExact> = afterExact.values.toList()
+
+    private fun checkExact() {
+        val now = System.currentTimeMillis() / 1000
+        for ((op, a) in afterExact) {
+            if (now - a.since > 3 * 86400) { afterExact.remove(op); continue }
+            val o = runCatching { rpc.txOut(a.txid, a.vout) }.getOrNull() ?: continue
+            if (o.optInt("confirmations") < 1) continue
+            val w = walletProvider().firstOrNull { it.type == a.type } ?: continue
+            afterExact.remove(op)
+            runCatching {
+                val coin = Wallet.Coin(a.txid, a.vout, a.value, rpc.height() - o.getInt("confirmations") + 1, 0, a.index, w.address(0, a.index), a.type)
+                val p = pickNodes(w, listOf(coin), listOf(a.node))
+                val c = a.create
+                if (c != null) {
+                    val (terms, poolSecret) = PoolSession.newPool(c.getLong("amount"), c.getDouble("feeRate"), c.getInt("maxPeers"), c.getInt("hours"),
+                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1))
+                    add(PoolSession.newState(terms, true, poolSecret, p.coins, p.keys, p.paths, p.mix, p.change, c.optString("password").ifEmpty { null }), p.keys).state
+                } else {
+                    val t = fetchPools().firstOrNull { it.id == a.poolId } ?: error("that pool is no longer open")
+                    joinWith(p, t, a.poolPassword)
+                }
+            }.onSuccess { emit("Coinjoin: perfect coin in", "${sats(a.value)} sats confirmed: " + (if (a.create != null) "pool opened" else "asked to join") + " on its own", it.poolId) }
+             .onFailure { emit("Coinjoin: perfect coin ready", "${sats(a.value)} sats confirmed, but ${it.message}. Join a pool with it.", null) }
+        }
     }
 
     fun sign(secret: Vault.Secret, poolId: String) {
@@ -185,6 +243,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                         "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
             }
         }, 20, 300, TimeUnit.SECONDS)
+        Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({ runCatching { checkExact() } }, 30, 30, TimeUnit.SECONDS)
     }
 
     // ------------------------------------------------------------------ events
@@ -219,6 +278,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
             val pool = "${sats(st.terms.amount)} sats pool"
             when (e) {
                 is PoolSession.Event.Changed -> {}
+                is PoolSession.Event.DidAlone -> {}   // the app's way of running on its own; here the events below do it
                 is PoolSession.Event.Welcomed -> emit("Coinjoin: you are in", "$pool · waiting for more people", st.poolId)
                 is PoolSession.Event.Rejected -> emit("Coinjoin: join refused", e.reason, st.poolId)
                 is PoolSession.Event.Joined -> emit("Coinjoin: someone joined", "$pool · ${e.peers}/${st.terms.maxPeers} people", st.poolId)
@@ -232,19 +292,20 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 is PoolSession.Event.Closing -> emit("Coinjoin: closing", "$pool · ${e.peers} people", st.poolId)
                 is PoolSession.Event.SignNeeded -> {
                     val secret = secretProvider()
-                    if (autoSign && secret != null) Thread {
+                    val keys = roundKeys[st.poolId]
+                    if (autoSign && (keys != null || secret != null)) Thread {
                         Thread.sleep(2000)
                         // sign() checks our mixed output, change and fee first, and refuses otherwise.
-                        runCatching { sign(secret, st.poolId) }
+                        runCatching { if (keys != null) sessions[st.poolId]!!.sign(keys) else sign(secret!!, st.poolId) }
                             .onSuccess { emit("Coinjoin: signed", "$pool · checked and signed on its own", st.poolId) }
                             .onFailure { emit("Coinjoin: NOT signed", "$pool · ${it.message}. Check it in Kilojoin.", st.poolId) }
                     }.start()
                     else emit("Coinjoin: sign now", "$pool · the transaction is ready to sign" +
-                        (if (autoSign) " (Kilojoin is locked: unlock it to sign)" else ""), st.poolId)
+                        (if (autoSign) " (Kilojoin restarted: unlock it to sign)" else ""), st.poolId)
                 }
-                is PoolSession.Event.Broadcast -> { rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Broadcast -> { roundKeys.remove(st.poolId); rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScript.toHex()); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
-                is PoolSession.Event.Aborted -> emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId)
+                is PoolSession.Event.Aborted -> { roundKeys.remove(st.poolId); emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId) }
                 is PoolSession.Event.ExpiringSoon -> emit("Coinjoin: under an hour left",
                     "$pool · ${e.peers}/${st.terms.maxPeers} people, enough to mix. It expires in ${e.minutes} min: ask to close now.", st.poolId)
             }
