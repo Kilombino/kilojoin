@@ -6,6 +6,8 @@ const sats = (v) => Number(v).toLocaleString("en").replace(/,/g, " ");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MIN = 10000, MAX = 100000000;
 let st = null, pools = [], view = "home", joining = null, chosen = [], msg = "", received = null, copied = false, sending = null;
+// Coinjoin tabs (0 JOIN, 1 IN PROGRESS, 2 HISTORY; null: pick on first draw) and the round cards opened by hand.
+let cjTab = null; const unfolded = {};
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -88,7 +90,7 @@ function phaseText(p) {
   return p.phase;
 }
 
-function myPool(p) {
+function myPool(p, embedded) {
   let actions = "";
   if (p.phase === "OPEN") actions = (p.people >= p.minPeers ? `<button data-a="close" data-p="${p.id}">ASK TO CLOSE NOW</button> ` : "") +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
@@ -101,6 +103,8 @@ function myPool(p) {
   if (p.txid) actions += `<p><code>${esc(p.txid)}</code></p>`;
   if (["CONFIRMED", "ABORTED", "REJECTED"].includes(p.phase)) actions += ` <button class="ghost" data-a="remove" data-p="${p.id}">remove</button>`;
   const cls = p.phase === "CONFIRMED" ? "good" : ["ABORTED", "REJECTED"].includes(p.phase) ? "bad" : ["VOTING", "SIGNING"].includes(p.phase) ? "warn" : "muted";
+  const coinLine = `<p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>`;
+  if (embedded) return `<div class="detail">${coinLine}${actions}</div>`;
   return `<div class="panel"><div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats${p.script === "p2tr" ? " · Taproot" : ""}</b><span class="faint" style="text-align:right">${p.creator ? "your pool" : "joined"}</span></div>
     <p class="${cls}">${esc(phaseText(p))}</p>
     <p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>${actions}</div>`;
@@ -200,24 +204,37 @@ function homeScreen() {
     h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate, joining.script))} sats with change, ${sats(feeNoChange(joining.feeRate, joining.script))} without, with one coin; each extra coin adds ${sats(Math.ceil(joining.feeRate * inVb(joining.script)))}.</p>
       <div id="coins">${coinPicker(joining.amount, joining.feeRate, joining.script, joining.maxInputs)}</div>${exactButton(joining.amount, joining.feeRate, joining.script)}
       <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${pickOk() ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
-  } else h += `<button id="create">＋ OPEN A POOL</button>`;
-  if (mine.length) h += `<div class="label" style="margin-top:18px">Your pools</div>` + mine.map(myPool).join("");
-  (st.waitingExact || []).forEach((x) => { h += `<div class="panel"><div class="label">Waiting for the perfect coin</div><p class="faint">${sats(x.value)} sats to yourself: at its first confirmation it ${x.create ? "opens your pool" : "joins the pool"} by itself.</p></div>`; });
-  h += `<div class="row" style="margin-top:18px"><div class="label">Open pools</div><button class="ghost" id="refresh" style="flex:0">refresh</button></div>`;
-  h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${sats(t.amount)} sats</b><br>
-      <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}</span><br>
-      <span class="faint">${t.peers}/${t.maxPeers} people (min ${t.minPeers}) · ${t.feeRate} sat/vB · closes in ${left(t.expiresAt)}<br>
-      costs you ${sats(t.feeWithChange)} sats with one coin (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span>
-      ${t.script === "p2tr" && !st.taproot ? `<br><span class="warn">Unlock Kilojoin again to set up its Taproot account.</span>` : ""}</div>
-      <button class="soft" data-join="${t.id}" style="flex:0" ${t.script === "p2tr" && !st.taproot ? "disabled" : ""}>JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
-  h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label>
-    <p class="small">Also to Telegram, with sound, through your own bot: make one with @BotFather, send it any message, and put its token and your chat id here (@userinfobot tells you your id).</p>
-    <input id="tgToken" placeholder="${st.telegram && st.telegram.telegram_set ? "bot token (saved; type to replace)" : "bot token"}" autocomplete="off">
-    <input id="tgChat" placeholder="your chat id" value="${(st.telegram && st.telegram.telegram_chat) || ""}">
-    <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span>
-    <label style="margin-top:10px;display:block"><input type="checkbox" id="beep" style="width:auto" ${soundOn() ? "checked" : ""}> sound and a notification in this browser, while this page is open</label></div>`;
-  h += `<div class="panel"><div class="label">Sign on its own</div><label><input type="checkbox" id="autoSign" style="width:auto" ${st.auto_sign ? "checked" : ""}> accept close requests and sign by itself</label>
-    <p class="small">Unlocking to open or join a pool is the only time it asks: the round goes on with this page closed, and signs only when the final transaction checks out (your mixed output, your change and your share of the fee). The keys of that round's coins stay in memory until it ends; if Kilojoin restarts, unlock it once to let it sign.</p></div>`;
+  } else {
+    // JOIN · IN PROGRESS · HISTORY, as in the Kilowallet app: rounds going are shown first.
+    const over = (p) => ["CONFIRMED", "ABORTED", "REJECTED"].includes(p.phase);
+    const active = mine.filter((p) => !over(p)), finished = mine.filter(over), waiting = st.waitingExact || [];
+    if (cjTab === null) cjTab = active.length || waiting.length ? 1 : 0;
+    h += `<div class="cjtabs">${["JOIN", "IN PROGRESS", "HISTORY"].map((l, i) => `<button class="${cjTab === i ? "on" : ""}" data-cjtab="${i}">${l}${i === 1 && active.length ? `<span class="count">${active.length}</span>` : ""}</button>`).join("")}</div>`;
+    if (cjTab === 1) {
+      if (!active.length && !waiting.length) h += `<p class="faint">No rounds going. Join a pool, or open your own, in JOIN.</p>`;
+      h += active.map(roundCard).join("");
+      waiting.forEach((x) => { h += `<div class="panel"><div class="label">Waiting for the perfect coin</div><p class="faint">${sats(x.value)} sats to yourself: at its first confirmation it ${x.create ? "opens your pool" : "joins the pool"} by itself.</p></div>`; });
+    } else if (cjTab === 2) {
+      h += finished.length ? finished.map(roundCard).join("") + `<button class="ghost" id="removeAll">remove all</button>` : `<p class="faint">Confirmed and cancelled rounds show here, for a week.</p>`;
+    } else {
+      h += `<button id="create">＋ OPEN A POOL</button>`;
+      h += `<div class="row" style="margin-top:18px"><div class="label">Open pools</div><button class="ghost" id="refresh" style="flex:0">refresh</button></div>`;
+      h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${sats(t.amount)} sats</b><br>
+          <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}</span><br>
+          <span class="faint">${t.peers}/${t.maxPeers} people (min ${t.minPeers}) · ${t.feeRate} sat/vB · closes in ${left(t.expiresAt)}<br>
+          costs you ${sats(t.feeWithChange)} sats with one coin (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span>
+          ${t.script === "p2tr" && !st.taproot ? `<br><span class="warn">Unlock Kilojoin again to set up its Taproot account.</span>` : ""}</div>
+          <button class="soft" data-join="${t.id}" style="flex:0" ${t.script === "p2tr" && !st.taproot ? "disabled" : ""}>JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
+      h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label>
+        <p class="small">Also to Telegram, with sound, through your own bot: make one with @BotFather, send it any message, and put its token and your chat id here (@userinfobot tells you your id).</p>
+        <input id="tgToken" placeholder="${st.telegram && st.telegram.telegram_set ? "bot token (saved; type to replace)" : "bot token"}" autocomplete="off">
+        <input id="tgChat" placeholder="your chat id" value="${(st.telegram && st.telegram.telegram_chat) || ""}">
+        <button id="tgSave">SAVE</button> <button id="tgTest">SEND A TEST</button> <span id="tgMsg" class="small"></span>
+        <label style="margin-top:10px;display:block"><input type="checkbox" id="beep" style="width:auto" ${soundOn() ? "checked" : ""}> sound and a notification in this browser, while this page is open</label></div>`;
+      h += `<div class="panel"><div class="label">Sign on its own</div><label><input type="checkbox" id="autoSign" style="width:auto" ${st.auto_sign ? "checked" : ""}> accept close requests and sign by itself</label>
+        <p class="small">Unlocking to open or join a pool is the only time it asks: the round goes on with this page closed, and signs only when the final transaction checks out (your mixed output, your change and your share of the fee). The keys of that round's coins stay in memory until it ends; if Kilojoin restarts, unlock it once to let it sign.</p></div>`;
+    }
+  }
   app.innerHTML = h;
   bind();
 }
@@ -284,6 +301,9 @@ function bind() {
       joining = null; chosen = []; await load();
     } catch (e) { msg = e.message; homeScreen(); }
   });
+  document.querySelectorAll("[data-cjtab]").forEach((b) => (b.onclick = () => { cjTab = parseInt(b.dataset.cjtab); homeScreen(); }));
+  document.querySelectorAll("[data-round]").forEach((d) => (d.onclick = () => { const id = d.dataset.round; unfolded[id] = !(id in unfolded ? unfolded[id] : d.dataset.open === "1"); homeScreen(); }));
+  on("#removeAll", async () => { for (const p of (st.mine || []).filter((m) => ["CONFIRMED", "ABORTED", "REJECTED"].includes(m.phase))) await api("/api/remove", { pool: p.id }).catch(() => {}); await load(); });
   document.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => {
     const a = b.dataset.a, p = b.dataset.p;
     if ((a === "leave") && !confirm("Leave / end this pool? Nothing was signed, so no coin moves.")) return;
@@ -354,3 +374,40 @@ setInterval(async () => {
       fresh.slice(0, 3).forEach(e => new Notification(e.title, { body: e.text, tag: e.at + e.title }));
   } catch (e) {}
 }, 5000);
+
+// ------------------------------------------------------------------ round cards
+
+// Where a round is, 1..5: people, closing vote, outputs and signatures, sent, confirmed (0: ended without).
+const roundStep = (p) => ({ JOINING: 1, OPEN: 1, VOTING: 2, CLOSING: 3, SIGNING: 3, BROADCAST: 4, CONFIRMED: 5 }[p.phase] || 0);
+// True while the round waits on you: an answer, or a signature by hand.
+const roundNeedsMe = (p) => !st.auto_sign && ((p.phase === "VOTING" && !p.iAsked && !p.voted) || (p.phase === "SIGNING" && !p.signed));
+const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+// One round at a glance: amount, the bar of its five steps, what is happening and where your coin is.
+function roundCard(p) {
+  const step = roundStep(p), ended = step === 0, needs = roundNeedsMe(p);
+  const open = p.id in unfolded ? unfolded[p.id] : needs;
+  const status = {
+    JOINING: "Asking to join",
+    OPEN: `Waiting for people · ${p.people}/${p.maxPeers} people · closes at ${hhmm(p.expiresAt)}`,
+    VOTING: needs ? `Closing vote · your answer, by ${hhmm(p.voteDeadline)}` : `Closing vote · ${p.people} people`,
+    CLOSING: `Closing · ${p.people} people · collecting outputs`,
+    SIGNING: p.signed ? "Signed · waiting for the others" : needs ? "Ready to sign" : "Signing",
+    BROADCAST: "Sent · waiting for a block", CONFIRMED: "Confirmed", ABORTED: "Cancelled", REJECTED: "Refused",
+  }[p.phase] || p.phase;
+  const where = p.phase === "BROADCAST" ? "Your coin left in the group transaction. Waiting for a block."
+    : p.phase === "CONFIRMED" ? `Done: your mixed coin of ${sats(p.amount)} sats is in your wallet.`
+    : ended ? `${esc((p.reason || "ended").replace(/^./, (c) => c.toUpperCase()))}. Your coin did not move.`
+    : "Your coin is still in your wallet — it hasn't left.";
+  const cls = ended ? "bad" : step === 5 ? "good" : "accent";
+  let dots = "";
+  for (let i = 1; i <= 5; i++) {
+    dots += `<span class="dot${i < step || step === 5 ? " done" : i === step ? " now" : ""}"></span>`;
+    if (i < 5) dots += `<span class="bar${i < step ? " done" : ""}"></span>`;
+  }
+  return `<div class="panel round${ended ? " ended" : ""}"><div class="tap" data-round="${p.id}" data-open="${needs ? 1 : 0}">
+    <div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats each${p.script === "p2tr" ? " · Taproot" : ""}</b><b class="${cls}" style="flex:0;white-space:nowrap">${ended ? "" : step + "/5 "}${open ? "⌄" : "›"}</b></div>
+    ${ended ? "" : `<div class="steps">${dots}</div>`}
+    <p class="${cls}" style="margin:4px 0">${status}</p><p class="muted" style="margin:0;font-size:13px">${where}</p></div>
+    ${open ? myPool(p, true) : ""}</div>`;
+}

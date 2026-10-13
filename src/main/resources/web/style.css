@@ -30,3 +30,18 @@ label { display:block; margin:8px 0 4px; color:var(--muted); font-size:13px; }
 .tabs { display:flex; gap:6px; margin-top:6px; }
 .tabs button { flex:1; }
 code { word-break:break-all; color:var(--muted); font-size:13px; }
+
+/* Coinjoin: JOIN · IN PROGRESS · HISTORY and the round cards with the bar of five steps, as in the app. */
+.cjtabs { display:flex; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:4px; gap:4px; margin:18px 0 6px; }
+.cjtabs button { flex:1; background:none; color:var(--faint); padding:10px 2px; font-size:12px; white-space:nowrap; }
+.cjtabs button.on { background:var(--purple); color:var(--ink); }
+.cjtabs .count { display:inline-block; margin-left:6px; background:var(--purple); color:var(--ink); border-radius:10px; padding:0 6px; font-size:11px; }
+.cjtabs button.on .count { background:var(--ink); color:var(--purple); }
+.round .tap { cursor:pointer; } .round.ended { border-color:#4a1f2a; } .accent { color:var(--purple); }
+.round .detail { margin-top:10px; }
+.steps { display:flex; align-items:center; margin:10px 0 6px; }
+.steps .dot { width:12px; height:12px; border-radius:50%; border:1.5px solid var(--faint); flex:none; box-sizing:border-box; }
+.steps .dot.done { background:var(--good); border-color:var(--good); }
+.steps .dot.now { background:var(--purple); border-color:var(--purple); }
+.steps .bar { flex:1; height:2px; background:var(--line); }
+.steps .bar.done { background:var(--good); }
