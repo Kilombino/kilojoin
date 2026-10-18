@@ -144,11 +144,12 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
 
     fun create(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
                hours: Int, password: String?, maxInputs: Int = 1): PoolSession.State {
-        val (terms, poolSecret) = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
-            w.type, maxInputs)
+        // Kilojoin v3 (blind outputs), like the app since 1.1.5.
+        val np = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
+            w.type, maxInputs, v3 = true)
         val p = pick(secret, w, cs)
-        return add(PoolSession.newState(terms, true, poolSecret, p.coins, p.keys, p.paths, p.mix, p.change,
-            password?.ifEmpty { null }), p.keys).state
+        return add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mix, p.change,
+            password?.ifEmpty { null }, np.creatorSecret, np.blindPriv), p.keys).state
     }
 
     fun join(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, terms: Protocol.Terms, password: String?): PoolSession.State {
@@ -191,9 +192,10 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 val p = pickNodes(w, listOf(coin), listOf(a.node))
                 val c = a.create
                 if (c != null) {
-                    val (terms, poolSecret) = PoolSession.newPool(c.getLong("amount"), c.getDouble("feeRate"), c.getInt("maxPeers"), c.getInt("hours"),
-                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1))
-                    add(PoolSession.newState(terms, true, poolSecret, p.coins, p.keys, p.paths, p.mix, p.change, c.optString("password").ifEmpty { null }), p.keys).state
+                    val np = PoolSession.newPool(c.getLong("amount"), c.getDouble("feeRate"), c.getInt("maxPeers"), c.getInt("hours"),
+                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1), v3 = true)
+                    add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mix, p.change, c.optString("password").ifEmpty { null },
+                        np.creatorSecret, np.blindPriv), p.keys).state
                 } else {
                     val t = fetchPools().firstOrNull { it.id == a.poolId } ?: error("that pool is no longer open")
                     joinWith(p, t, a.poolPassword)

@@ -15,7 +15,7 @@ import org.json.JSONObject
 import java.math.BigInteger
 
 /**
- * Prints docs/vectors.json: Kilojoin v1 test vectors made by the very code Kilowallet and
+ * Prints docs/vectors.json: Kilojoin v1 test vectors (and v3's MACs) made by the very code Kilowallet and
  * Kilojoin run, from fixed keys, so another implementation can check itself byte for byte.
  * Run: java -cp build/libs/kilojoin.jar com.kilombino.kilojoin.tools.VectorsKt
  */
@@ -95,5 +95,15 @@ fun main() {
         .put("event", JSONObject().put("id", h.toHex()).put("pubkey", poolPub).put("created_at", created)
             .put("kind", Protocol.KIND_MSG).put("tags", JSONArray().put(JSONArray().put("p").put(poolPub)))
             .put("content", content).put("sig", Schnorr.sign(poolKey, h, ByteArray(32)).toHex())))
+    // --- v3: a seat proves itself with a MAC under its token (the token never goes on the channel)
+    val token = "00112233445566778899aabbccddeeff"
+    val blinded = "ab".repeat(256)
+    val blindDigest = Hashes.sha256(Hashes.hexToBytes(blinded)).toHex()
+    out.put("v3", JSONObject().put("token", token).put("token_hash", Protocol.tokenHash(token))
+        .put("mac_close", JSONObject().put("vote_id", "0102030405060708").put("mac", Protocol.mac(token, "close", "0102030405060708")))
+        .put("mac_vote", JSONObject().put("vote_id", "0102030405060708").put("accept", true).put("mac", Protocol.mac(token, "vote", "0102030405060708", true)))
+        .put("mac_leave", JSONObject().put("mac", Protocol.mac(token, "leave")))
+        .put("mac_blind", JSONObject().put("round_id", "a1b2c3d4e5f60718").put("blinded", blinded).put("blinded_sha256", blindDigest)
+            .put("mac", Protocol.mac(token, "blind", "a1b2c3d4e5f60718", blindDigest))))
     println(out.toString(2))
 }

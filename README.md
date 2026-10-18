@@ -19,7 +19,7 @@ On StartOS, install it from the Kilombino Registry (package `kilojoin`, wrapper 
 
 ## Protocol
 
-[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1 and v2 (Taproot pools, several coins per person) for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
+[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1, v2 (Taproot pools, several coins per person) and v3 (blind outputs: nobody, not even the pool's creator, can tell whose mixed output is whose) for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
 
 ## Build and run
 

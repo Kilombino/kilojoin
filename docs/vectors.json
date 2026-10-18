@@ -54,6 +54,26 @@
       "pubkey": "033d936b7f342e8ca685fa46e4b87f966e95c43f0860260a8fd30a41ce40ad1155"
     }
   },
+  "v3": {
+    "token_hash": "ecfb468750ddb844ac6165d1580994faa375d2b72e81ab84b631580c9667d679",
+    "mac_vote": {
+      "vote_id": "0102030405060708",
+      "mac": "2d57740af03d8df43f9084cfd5cb0573ab1ec257861274fd257d5de4ad6fc851",
+      "accept": true
+    },
+    "mac_blind": {
+      "round_id": "a1b2c3d4e5f60718",
+      "blinded_sha256": "1080e279b51b8594a78556e2fdb4dfe9ca82ac2fbab5007de2bac4213c2e1f92",
+      "blinded": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      "mac": "ffec5befa75ed2dca05d61b3d896839422a8073fc263169f0a14c43081615d67"
+    },
+    "mac_close": {
+      "vote_id": "0102030405060708",
+      "mac": "67827e0c2518b22351334376277015a322fca8bbdc2ea0c86b33ed2c66196c4f"
+    },
+    "mac_leave": {"mac": "fee4dcabe65c98712df674e7aa3394722faad402670425d5b146c98e1c5f5a68"},
+    "token": "00112233445566778899aabbccddeeff"
+  },
   "transaction": {
     "sig_B": "304402202d3e105b68343fee767bcd7554b456257bfde766f871d95b245c51d1d04fdf03022078d2b9506df24e9a9eff3b8d7f22328e7ec0f8e0eb8787f173e11ae8a27317fa21",
     "inputs_in_order": [

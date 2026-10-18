@@ -1,8 +1,8 @@
-# Kilojoin v1 and v2 — protocol
+# Kilojoin v1, v2 and v3 — protocol
 
 Kilojoin is coinjoin for the BLAKE2b chain (BIP-110 + BLAKE2b proof of work). Nobody coordinates it and nobody holds funds: pools are announced on a Nostr relay, and the people in a pool talk through NIP-44 encrypted Nostr events. Each wallet builds the same transaction, checks its own output and change, and signs only its own input. The design follows Joinstr, adapted to how Kilowallet starts a round: people join an open pool, and once enough are in, anyone can ask to close it and the rest vote.
 
-This document describes v1 exactly as implemented in (and, in section 10, what v2 changes):
+This document describes v1 exactly as implemented in (and what v2 changes in section 10, and v3 in section 11):
 
 - Kilowallet (Android): `app/src/main/java/com/kilombino/pyblockwatch/coinjoin/`
   - `Protocol.kt`: constants, messages, hashes
@@ -334,3 +334,85 @@ Tested on a BLAKE2b regtest node over relay.kilombino.com:
 - Kilowallet↔Kilowallet: a Taproot pool, one person with two coins and one with one. A native SegWit coin passed off as Taproot was refused. The round was mined with 3 × 65-byte Schnorr witnesses and 4 P2TR outputs (356 vB).
 - Kilojoin↔Kilojoin: the same round shape, also mined.
 
+
+---
+
+## 11. Kilojoin v3 (Kilowallet 1.1.5, Kilojoin 0.7)
+
+v3 hides which mixed output is whose from **everyone**: the relay, the other members and the pool's creator. It also stops anyone from speaking for the creator or for another member. Everything not listed here is as in v2 (pool types, several coins per person, fees, transaction, signatures).
+
+Since Kilowallet 1.1.5 and Kilojoin 0.7, every pool they open is v3. They still list and join v1 and v2 pools.
+
+### Why
+
+In v1/v2 every member holds the pool key, and mixed outputs are posted on the channel with it after a random delay. The creator, who reads every join, could still try to tie outputs to seats by timing. Any member could also write as the pool key: post a roster, close a round, or vote with a token it had seen. v3 fixes both.
+
+### Pool announcement
+
+- `"v": 3`, and two more fields:
+  - `"creator"`: the creator's own Nostr key (x-only hex, 64 chars). It must differ from the pool key.
+  - `"blind_key"`: the creator's RSA key for blind signatures, `"<n hex>:<e hex>"`. `n` is 2048 to 4096 bits, and `e` = 65537. A fresh key is made for each pool and lives only as long as the pool.
+- The announcement is still signed by the pool key. A wallet that only knows v1/v2 does not list v3 pools (it accepts `v` 1 or 2 only).
+
+### Who speaks for the pool
+
+- **Only the creator's own key** sends what runs the pool: `welcome` and `reject` (direct, to the join key), and on the channel `roster`, `vote_open`, `reopen`, `closing`, `blind_sig` and `outputs`.
+- On the channel these go as kind 2023 events **authored by `creator`**, with `p` = pool key. They are NIP-44 encrypted under the conversation key of (creator, pool key), so every member reads them with the pool secret.
+- Members ignore any of these message types that does not come from `creator`. A member still sends its own messages (`close_request`, `vote`, `leave`, `blind`, `sig`, `tx`, `abort`) as before: author and `p` = pool key.
+
+### Seats prove themselves with a MAC
+
+The seat token never goes on the channel in v3. A member proves its seat with `token_hash` (as in v1: `sha256("kilojoin/v1/token|" + token)`) plus a MAC:
+
+```
+mac(token, parts…) = hex(HMAC-SHA256(key = token as ASCII, msg = "kilojoin/v3|" + parts joined with "|"))
+```
+
+Booleans are written `true`/`false`. The messages are:
+
+| message | fields | MAC parts |
+|---|---|---|
+| `close_request` | `token_hash`, `vote_id`, `mac` | `"close", vote_id` |
+| `vote` | `token_hash`, `vote_id`, `accept`, `mac` | `"vote", vote_id, accept` |
+| `leave` | `token_hash`, `mac` | `"leave"` |
+| `blind` | `token_hash`, `round_id`, `blinded`, `mac` | `"blind", round_id, sha256(blinded bytes) hex` |
+
+Only the creator, who keeps every seat's token, can check them. A member's `close_request` is not a vote by itself. When the MAC checks out, the creator opens the vote with `vote_open` `{by: <token_hash>, vote_id}`, and members treat that exactly as a v1 `close_request` from that seat. When the pool fills up, the creator opens it with its own token hash.
+
+### Roster: every member checks every seat
+
+- Each seat in `roster` and `closing` also carries `"join_pub"` (the key it joined with; for the creator's own seat, the pool key) and `"proofs"` (its ownership proofs, one per coin, as in the join).
+- On every roster, each member checks every seat against the chain, as the creator did when it let the seat in:
+  - the proofs: `checkOwnership(pool id, join_pub, coin, proof)`, the v1 ownership message signed for that join key;
+  - every coin: unspent, with the stated value and script.
+- A member that finds a seat whose coin is not real leaves the pool.
+
+### Closing a round: blind outputs
+
+1. **The creator** sends `closing` with a fresh `"round_id"` (8 random bytes, hex), the round's seats and the deadline. Blind signatures and outputs count for that round only. The creator's own output goes straight into its list.
+2. **Each member** prepares its message and blinds it, as in RFC 9474, variant **RSABSSA-SHA384-PSS-Randomized**:
+   - the message is a 32-byte random `prefix` followed by the member's mixed output script (raw bytes): `msg = prefix ‖ script`;
+   - it is encoded with EMSA-PSS: SHA-384, MGF1-SHA-384, a 48-byte salt;
+   - it is blinded with a random factor `r` coprime to `n`: `blinded = m·r^e mod n`, written big-endian to exactly the modulus length.
+   
+   It sends `blind` on the channel. If it has to send again (every 30 s until answered), it resends the same `blinded`.
+3. **The creator** checks the MAC and that the seat is in this round. It signs `blinded` (`s = blinded^d mod n`, checked against `e` before it goes out) **once per seat**: a repeat of the same `blinded` gets the same signature, and a different one is ignored. It answers `blind_sig` `{token_hash, round_id, sig}` on the channel.
+4. **The member** unblinds the signature (`sig = s·r⁻¹ mod n`) and checks it with RSASSA-PSS-VERIFY. A wrong one makes it leave the round. After a random wait of 3 to 43 s, it **hands its output in from a fresh key**:
+   - a new secp256k1 key made only for this, over **a new relay connection** (through Tor in the app when Tor is on);
+   - a kind 2023 event, author = the fresh key, `p` = `creator`;
+   - content NIP-44 under (fresh key, creator): `{"type":"output","round_id","script","prefix","sig"}`.
+   
+   Nothing in it points back at the seat.
+5. **The creator** checks each output it is handed: the round, the script's type (as in v2), the 32-byte prefix, and `RSASSA-PSS-VERIFY(blind_key, prefix ‖ script, sig)`. It keeps the valid ones. Once it holds exactly one per seat of the round, it sends `outputs` `{round_id, scripts: [...]}`, **sorted**, so the order says nothing about who handed in first. More outputs than seats aborts the round.
+6. **Every member** checks the list: as many scripts as seats in the round, no repeats, every script of the pool's type, and its own among them (the usual check before signing). Then signing goes on exactly as in v2.
+
+The creator sees each blinded request with its seat, and each output with its signature, but cannot link the two: that is what the blind signature gives. Each seat gets one signature, so nobody can add an output that isn't theirs. Since only `creator` can send `outputs`, a member can't post a list of its own.
+
+If not every output is in 60 s after the round's deadline, the round aborts, as in v1. Nobody's coins have moved at that point.
+
+### Test vectors
+
+- **Blind signatures:** RFC 9474, Appendix A, the RSABSSA-SHA384-PSS-Randomized vector. Kilowallet's `BlindRsa` is checked against it in `BlindRsaTest`.
+- **MAC:** `v3` in [`vectors.json`](vectors.json).
+
+Tested end to end: three Kilowallet wallets on a BLAKE2b regtest node over relay.kilombino.com (`CoinjoinE2ETest.v3BlindOutputs`), mined.
