@@ -23,15 +23,18 @@ function left(at) {
 // Each person's fee share, as Kilowallet works it out: their inputs, their outputs, half the overhead.
 // P2WPKH: input 68 vB, output 31. Taproot: input 57.75 (with the unified hash byte), output 43.
 const inVb = (t) => (t === "p2tr" ? 57.75 : 68), outVb = (t) => (t === "p2tr" ? 43 : 31);
-const feeNoChange = (rate, t = "p2wpkh", n = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) + 10.5 / 2));
-const feeWithChange = (rate, t = "p2wpkh", n = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) * 2 + 10.5 / 2));
+// o: mixed outputs each person gets (Kilojoin v4: 2 to 5; 1 before).
+const feeNoChange = (rate, t = "p2wpkh", n = 1, o = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) * o + 10.5 / 2));
+const feeWithChange = (rate, t = "p2wpkh", n = 1, o = 1) => Math.ceil(rate * (inVb(t) * n + outVb(t) * (o + 1) + 10.5 / 2));
+// "4 × 100 000" for a pool of several outputs each, the plain amount otherwise.
+const amountOf = (amount, o) => (o > 1 ? o + " × " + sats(amount) : sats(amount));
 const kind = (t) => (t === "p2tr" ? "Taproot (bc1p)" : "native SegWit (bc1q)");
 const badge = (t) => `<span class="${t === "p2tr" ? "good" : "muted"}">${t === "p2tr" ? "bc1p" : "bc1q"}</span>`;
 // What a seat of these coins gives back: change, 0 (no change) or null (not enough).
-function seatChange(total, amount, rate, t, n) {
-  const w = total - amount - feeWithChange(rate, t, n);
+function seatChange(total, amount, rate, t, n, o = 1) {
+  const w = total - amount * o - feeWithChange(rate, t, n, o);
   if (w > 294) return w;
-  return total - amount - feeNoChange(rate, t, n) >= 0 ? 0 : null;
+  return total - amount * o - feeNoChange(rate, t, n, o) >= 0 ? 0 : null;
 }
 
 // ---------------------------------------------------------------- screens
@@ -99,20 +102,20 @@ function myPool(p, embedded) {
     : `<p class="muted">Answer within ${left(p.voteDeadline)}.</p><button data-a="yes" data-p="${p.id}">ACCEPT</button> <button class="soft" data-a="no" data-p="${p.id}">NOT YET</button> `) +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
   if (p.phase === "SIGNING") actions = p.signed ? `<span class="muted">Signed. Waiting for the others (${p.sigs}/${p.planCoins} coins)…</span>` :
-    `<p class="muted">Checked: ${p.planPeople} people (${p.planCoins} coins), identical outputs of ${sats(p.amount)} sats, one of them yours; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
+    `<p class="muted">Checked: ${p.planPeople} people (${p.planCoins} coins), identical outputs of ${sats(p.amount)} sats, ${p.outputs > 1 ? p.outputs + " of them" : "one of them"} yours; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
   if (p.txid) actions += `<p><code>${esc(p.txid)}</code></p>`;
   if (["CONFIRMED", "ABORTED", "REJECTED"].includes(p.phase)) actions += ` <button class="ghost" data-a="remove" data-p="${p.id}">remove</button>`;
   const cls = p.phase === "CONFIRMED" ? "good" : ["ABORTED", "REJECTED"].includes(p.phase) ? "bad" : ["VOTING", "SIGNING"].includes(p.phase) ? "warn" : "muted";
-  const coinLine = `<p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>`;
+  const coinLine = `<p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${amountOf(p.amount, p.outputs)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount * p.outputs - p.change)}</p>`;
   if (embedded) return `<div class="detail">${coinLine}${actions}</div>`;
-  return `<div class="panel"><div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats${p.script === "p2tr" ? " · Taproot" : ""}</b><span class="faint" style="text-align:right">${p.creator ? "your pool" : "joined"}</span></div>
+  return `<div class="panel"><div class="row"><b>${p.private ? "🔒 " : ""}${amountOf(p.amount, p.outputs)} sats${p.script === "p2tr" ? " · Taproot" : ""}</b><span class="faint" style="text-align:right">${p.creator ? "your pool" : "joined"}</span></div>
     <p class="${cls}">${esc(phaseText(p))}</p>
-    <p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${sats(p.amount)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount - p.change)}</p>${actions}</div>`;
+    <p class="faint">${p.coins > 1 ? "your " + p.coins + " coins" : "your coin"} ${sats(p.coinValue)} → ${amountOf(p.amount, p.outputs)} mixed${p.change > 0 ? " + " + sats(p.change) + " change" : ""} · fee ${sats(p.coinValue - p.amount * p.outputs - p.change)}</p>${actions}</div>`;
 }
 
 // The pool's coins: only its address type; one coin each, or up to maxInputs ticked together.
-function coinPicker(amount, rate, t, maxInputs) {
-  const exact = amount + feeNoChange(rate, t, 1);
+function coinPicker(amount, rate, t, maxInputs, o = 1) {
+  const exact = amount * o + feeNoChange(rate, t, 1, o);
   const coins = (st.coins || []).filter((c) => !c.inRound && c.confirmations > 0 && c.type === t && (maxInputs > 1 || c.value >= exact))
     .sort((a, b) => (a.value === exact ? -1 : b.value === exact ? 1 : b.value - a.value));
   let h = `<p class="faint">Only ${kind(t)} coins can join this pool${maxInputs > 1 ? `; tick up to ${maxInputs}` : "; pick ONE"}. Your other coins can still pay for an exact coin of this type below.</p>`;
@@ -121,10 +124,10 @@ function coinPicker(amount, rate, t, maxInputs) {
       <span class="faint">${c.confirmations} conf${c.label ? " · " + c.label : ""} · ${esc(c.address.slice(0, 10))}…${esc(c.address.slice(-6))}</span></div>`).join("");
   if (chosen.length) {
     const total = (st.coins || []).filter((c) => chosen.includes(c.outpoint)).reduce((a, c) => a + c.value, 0);
-    const ch = seatChange(total, amount, rate, t, chosen.length);
-    h += `<p class="${ch === null ? "warn" : "good"}">${chosen.length} coin(s), ${sats(total)} sats → ` + (ch === null ? `${sats(amount + feeNoChange(rate, t, chosen.length) - total)} sats short`
-      : ch === 0 ? (total === exact ? "★ exact: no change" : `no change, ${sats(total - amount - feeNoChange(rate, t, chosen.length))} extra to the miners`)
-      : `${sats(amount)} mixed + ${sats(ch)} change · fee ${sats(total - amount - ch)}`) + `</p>`;
+    const ch = seatChange(total, amount, rate, t, chosen.length, o);
+    h += `<p class="${ch === null ? "warn" : "good"}">${chosen.length} coin(s), ${sats(total)} sats → ` + (ch === null ? `${sats(amount * o + feeNoChange(rate, t, chosen.length, o) - total)} sats short`
+      : ch === 0 ? (total === exact ? "★ exact: no change" : `no change, ${sats(total - amount * o - feeNoChange(rate, t, chosen.length, o))} extra to the miners`)
+      : `${amountOf(amount, o)} mixed + ${sats(ch)} change · fee ${sats(total - amount * o - ch)}`) + `</p>`;
     if (ch > 0) h += `<p class="warn">Tip: an exact coin of ${sats(exact)} sats joins with no change at all, so nothing ties your mixed output to anything.</p>`;
   }
   return h;
@@ -132,12 +135,12 @@ function coinPicker(amount, rate, t, maxInputs) {
 const pickOk = () => {
   if (!joining || !chosen.length) return false;
   const total = (st.coins || []).filter((c) => chosen.includes(c.outpoint)).reduce((a, c) => a + c.value, 0);
-  return seatChange(total, joining.amount, joining.feeRate, joining.script, chosen.length) !== null;
+  return seatChange(total, joining.amount, joining.feeRate, joining.script, chosen.length, joining.outputs) !== null;
 };
 
 // The perfect coin for a pool: a payment to yourself of exactly amount + the no-change fee share, of the pool's type.
-function exactButton(amount, rate, t) {
-  const exact = amount + feeNoChange(rate, t, 1);
+function exactButton(amount, rate, t, o = 1) {
+  const exact = amount * o + feeNoChange(rate, t, 1, o);
   if ((st.coins || []).some((c) => c.value === exact && c.type === t && !c.inRound)) return "";
   return `<button class="ghost" id="exact" data-exact="${exact}" data-type="${t}">＋ PREPARE AN EXACT COIN OF ${sats(exact)} SATS</button>`;
 }
@@ -192,17 +195,19 @@ function homeScreen() {
     <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE bc1q</button>${st.taproot ? `<button class="soft" id="recvtr">RECEIVE bc1p</button>` : ""}<button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh ${kind(received.type)} address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
   if (sending) h += sendPanel();
   else if (joining) {
-    h += `<div class="panel"><div class="label">${joining.create ? "Open a pool" : "Join · " + sats(joining.amount) + " sats"}</div>`;
+    h += `<div class="panel"><div class="label">${joining.create ? "Open a pool" : "Join · " + amountOf(joining.amount, joining.outputs) + " sats"}</div>`;
     if (joining.create) h += `<label>address type: every coin, mixed output and change of the pool is of it</label>
       <select id="c-type"><option value="p2wpkh" ${joining.script === "p2wpkh" ? "selected" : ""}>Native SegWit (bc1q)</option>${st.taproot ? `<option value="p2tr" ${joining.script === "p2tr" ? "selected" : ""}>Taproot (bc1p)</option>` : ""}</select>
-      <div class="row"><div><label>amount per person (sats)</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
+      <label>mixed outputs per person (1–5)</label><input id="c-outputs" value="${joining.outputs}">
+      <p class="faint">${joining.outputs > 1 ? `Each person gets ${joining.outputs} mixed outputs of the amount below, each to an unused address of their own (${sats(joining.amount * joining.outputs)} sats per person in all). Only Kilojoin 0.8 and Kilowallet 1.2.0 or newer (Kilojoin v4) see this pool.` : "One mixed output each: every Kilojoin v3 wallet can join it."}</p>
+      <div class="row"><div><label>${joining.outputs > 1 ? "amount of each output (sats)" : "amount per person (sats)"}</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
       <div class="row"><div><label>fewest people</label><input id="c-min" value="2"></div><div><label>most people</label><input id="c-max" value="5"></div><div><label>open for (hours)</label><input id="c-hours" value="6"></div></div>
       <label>most coins per person (1–10)</label><input id="c-inputs" value="${joining.maxInputs}">
       <p class="small">Blind outputs (Kilojoin v3): when the round closes, nobody, not even you as its creator, can tell whose mixed output is whose. Only Kilowallet 1.1.5+ and Kilojoin 0.7+ see this pool.</p>
       <label>password (optional: makes it private 🔒)</label><input id="c-pw">`;
     else if (joining.private) h += `<label>🔒 pool password</label><input id="c-pw">`;
-    h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate, joining.script))} sats with change, ${sats(feeNoChange(joining.feeRate, joining.script))} without, with one coin; each extra coin adds ${sats(Math.ceil(joining.feeRate * inVb(joining.script)))}.</p>
-      <div id="coins">${coinPicker(joining.amount, joining.feeRate, joining.script, joining.maxInputs)}</div>${exactButton(joining.amount, joining.feeRate, joining.script)}
+    h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate, joining.script, 1, joining.outputs))} sats with change, ${sats(feeNoChange(joining.feeRate, joining.script, 1, joining.outputs))} without, with one coin; each extra coin adds ${sats(Math.ceil(joining.feeRate * inVb(joining.script)))}.</p>
+      <div id="coins">${coinPicker(joining.amount, joining.feeRate, joining.script, joining.maxInputs, joining.outputs)}</div>${exactButton(joining.amount, joining.feeRate, joining.script, joining.outputs)}
       <div class="row"><button class="soft" id="cancel">CANCEL</button><button id="confirm" ${pickOk() ? "" : "disabled"}>${joining.create ? "OPEN POOL" : "JOIN"}</button></div></div>`;
   } else {
     // JOIN · IN PROGRESS · HISTORY, as in the Kilowallet app: rounds going are shown first.
@@ -219,10 +224,10 @@ function homeScreen() {
     } else {
       h += `<button id="create">＋ OPEN A POOL</button>`;
       h += `<div class="row" style="margin-top:18px"><div class="label">Open pools</div><button class="ghost" id="refresh" style="flex:0">refresh</button></div>`;
-      h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${sats(t.amount)} sats</b><br>
-          <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}${t.version >= 3 ? " · blind outputs (v3)" : ""}</span><br>
+      h += open.length ? open.map((t) => `<div class="panel"><div class="item"><div><b>${t.private ? "🔒 " : ""}${amountOf(t.amount, t.outputs)} sats</b><br>
+          <span class="${t.script === "p2tr" ? "good" : "muted"}">${kind(t.script)} coins only · ${t.maxInputs > 1 ? "up to " + t.maxInputs + " coins each" : "one coin each"}${t.outputs > 1 ? " · " + t.outputs + " outputs each (v4)" : t.version >= 3 ? " · blind outputs (v3)" : ""}</span><br>
           <span class="faint">${t.peers}/${t.maxPeers} people (min ${t.minPeers}) · ${t.feeRate} sat/vB · closes in ${left(t.expiresAt)}<br>
-          costs you ${sats(t.feeWithChange)} sats with one coin (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount + t.feeNoChange)})</span>
+          costs you ${sats(t.feeWithChange)} sats with one coin (${sats(t.feeNoChange)} with an exact coin of ${sats(t.amount * t.outputs + t.feeNoChange)})</span>
           ${t.script === "p2tr" && !st.taproot ? `<br><span class="warn">Unlock Kilojoin again to set up its Taproot account.</span>` : ""}</div>
           <button class="soft" data-join="${t.id}" style="flex:0" ${t.script === "p2tr" && !st.taproot ? "disabled" : ""}>JOIN</button></div></div>`).join("") : `<p class="muted">No open pools right now. Open one: phones with Kilowallet and other nodes are notified.</p>`;
       h += `<div class="panel"><div class="label">Notifications</div><label><input type="checkbox" id="notify" style="width:auto" ${st.notify_new_pools ? "checked" : ""}> notify new public pools (every 5 minutes)</label>
@@ -262,7 +267,7 @@ function bind() {
     const pick = []; let sum = 0;
     for (const c of pool) { if (sum >= exact + 500) break; pick.push(c.outpoint); sum += c.value; }
     // Once it confirms, Kilojoin joins this pool (or opens the one being set up) by itself.
-    const after = !joining ? null : joining.create ? { create: { amount: joining.amount, feeRate: joining.feeRate, script: joining.script, maxInputs: joining.maxInputs,
+    const after = !joining ? null : joining.create ? { create: { amount: joining.amount, feeRate: joining.feeRate, script: joining.script, maxInputs: joining.maxInputs, outputs: joining.outputs,
         minPeers: parseInt($("#c-min").value) || 2, maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value } }
       : { pool: joining.id, poolPassword: $("#c-pw") ? $("#c-pw").value : "" };
     joining = null; chosen = [];
@@ -280,9 +285,9 @@ function bind() {
     readSend(); if (sending.preview) { sending.preview = null; homeScreen(); }
   }));
   on("#refresh", async () => { pools = await api("/api/pools"); homeScreen(); });
-  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 1, script: "p2wpkh", maxInputs: 5 }; chosen = []; homeScreen(); });
+  on("#create", () => { joining = { create: true, amount: MIN, feeRate: 1, script: "p2wpkh", maxInputs: 5, outputs: 1 }; chosen = []; homeScreen(); });
   on("#cancel", () => { joining = null; chosen = []; homeScreen(); });
-  document.querySelectorAll("[data-join]").forEach((b) => (b.onclick = () => { const t = pools.find((p) => p.id === b.dataset.join); joining = { create: false, id: t.id, amount: t.amount, feeRate: t.feeRate, private: t.private, script: t.script, maxInputs: t.maxInputs }; chosen = []; homeScreen(); }));
+  document.querySelectorAll("[data-join]").forEach((b) => (b.onclick = () => { const t = pools.find((p) => p.id === b.dataset.join); joining = { create: false, id: t.id, amount: t.amount, feeRate: t.feeRate, private: t.private, script: t.script, maxInputs: t.maxInputs, outputs: t.outputs || 1 }; chosen = []; homeScreen(); }));
   document.querySelectorAll("[data-coin]").forEach((d) => (d.onclick = () => {
     const op = d.dataset.coin;
     if (chosen.includes(op)) chosen = chosen.filter((x) => x !== op);
@@ -290,12 +295,13 @@ function bind() {
     else chosen = [op];
     homeScreen();
   }));
-  if (joining && joining.create) ["#c-amount", "#c-rate", "#c-type", "#c-inputs"].forEach((id) => ($(id).onchange = () => {
+  if (joining && joining.create) ["#c-amount", "#c-rate", "#c-type", "#c-inputs", "#c-outputs"].forEach((id) => ($(id).onchange = () => {
     joining.amount = Math.max(MIN, Math.min(MAX, parseInt($("#c-amount").value) || MIN)); joining.feeRate = Math.max(1, parseFloat($("#c-rate").value) || 2);
-    joining.script = $("#c-type").value; joining.maxInputs = Math.max(1, Math.min(10, parseInt($("#c-inputs").value) || 1)); chosen = []; homeScreen(); }));
+    joining.script = $("#c-type").value; joining.maxInputs = Math.max(1, Math.min(10, parseInt($("#c-inputs").value) || 1));
+    joining.outputs = Math.max(1, Math.min(5, parseInt($("#c-outputs").value) || 1)); chosen = []; homeScreen(); }));
   on("#confirm", async () => {
     try {
-      if (joining.create) await api("/api/create", { coins: chosen, script: joining.script, maxInputs: joining.maxInputs, amount: joining.amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
+      if (joining.create) await api("/api/create", { coins: chosen, script: joining.script, maxInputs: joining.maxInputs, outputs: joining.outputs, amount: joining.amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
         maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value });
       else await api("/api/join", { pool: joining.id, coins: chosen, password: $("#c-pw") ? $("#c-pw").value : "" });
       joining = null; chosen = []; await load();
@@ -396,7 +402,7 @@ function roundCard(p) {
     BROADCAST: "Sent · waiting for a block", CONFIRMED: "Confirmed", ABORTED: "Cancelled", REJECTED: "Refused",
   }[p.phase] || p.phase;
   const where = p.phase === "BROADCAST" ? "Your coin left in the group transaction. Waiting for a block."
-    : p.phase === "CONFIRMED" ? `Done: your mixed coin of ${sats(p.amount)} sats is in your wallet.`
+    : p.phase === "CONFIRMED" ? (p.outputs > 1 ? `Done: your ${p.outputs} mixed coins of ${sats(p.amount)} sats are in your wallet.` : `Done: your mixed coin of ${sats(p.amount)} sats is in your wallet.`)
     : ended ? `${esc((p.reason || "ended").replace(/^./, (c) => c.toUpperCase()))}. Your coin did not move.`
     : "Your coin is still in your wallet — it hasn't left.";
   const cls = ended ? "bad" : step === 5 ? "good" : "accent";
@@ -406,7 +412,7 @@ function roundCard(p) {
     if (i < 5) dots += `<span class="bar${i < step ? " done" : ""}"></span>`;
   }
   return `<div class="panel round${ended ? " ended" : ""}"><div class="tap" data-round="${p.id}" data-open="${needs ? 1 : 0}">
-    <div class="row"><b>${p.private ? "🔒 " : ""}${sats(p.amount)} sats each${p.script === "p2tr" ? " · Taproot" : ""}</b><b class="${cls}" style="flex:0;white-space:nowrap">${ended ? "" : step + "/5 "}${open ? "⌄" : "›"}</b></div>
+    <div class="row"><b>${p.private ? "🔒 " : ""}${amountOf(p.amount, p.outputs)} sats each${p.script === "p2tr" ? " · Taproot" : ""}</b><b class="${cls}" style="flex:0;white-space:nowrap">${ended ? "" : step + "/5 "}${open ? "⌄" : "›"}</b></div>
     ${ended ? "" : `<div class="steps">${dots}</div>`}
     <p class="${cls}" style="margin:4px 0">${status}</p><p class="muted" style="margin:0;font-size:13px">${where}</p></div>
     ${open ? myPool(p, true) : ""}</div>`;

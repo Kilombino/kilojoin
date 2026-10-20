@@ -105,5 +105,27 @@ fun main() {
         .put("mac_leave", JSONObject().put("mac", Protocol.mac(token, "leave")))
         .put("mac_blind", JSONObject().put("round_id", "a1b2c3d4e5f60718").put("blinded", blinded).put("blinded_sha256", blindDigest)
             .put("mac", Protocol.mac(token, "blind", "a1b2c3d4e5f60718", blindDigest))))
+    // --- v4: several mixed outputs per person. One `blind` request carries them all; its MAC
+    // covers sha256 of the blinded messages back to back. The fees count every output.
+    val blinded2 = listOf("ab".repeat(256), "cd".repeat(256))
+    val digest2 = Hashes.sha256(blinded2.map { Hashes.hexToBytes(it) }.reduce { x, y -> x + y }).toHex()
+    val k = 2
+    val mixA2 = listOf(mixA, byteArrayOf(0x00, 0x14) + Hashes.hash160(pub33(key(7))))
+    val mixB2 = listOf(mixB, byteArrayOf(0x00, 0x14) + Hashes.hash160(pub33(key(8))))
+    val coinA4 = coinA.copy(value = CoinjoinTx.minimumCoin(amount, feeRate, outputs = k))   // its perfect coin: no change
+    val coinB4 = coinB.copy(value = 50_000)
+    val changeB4 = CoinjoinTx.change(coinB4.value, amount, feeRate, outputs = k)!!
+    val plan4 = CoinjoinTx.plan(listOf(coinA4, coinB4), mixA2 + mixB2, listOf(TxBuilder.Output(chB, changeB4)), amount, k)
+    out.put("v4", JSONObject().put("outputs", k).put("denomination", amount).put("fee_rate", feeRate)
+        .put("fee_share", JSONObject().put("with_change", CoinjoinTx.feeShare(feeRate, true, 1, outputs = k))
+            .put("without_change", CoinjoinTx.feeShare(feeRate, false, 1, outputs = k))
+            .put("perfect_coin", CoinjoinTx.minimumCoin(amount, feeRate, outputs = k))
+            .put("change_for_50000", changeB4))
+        .put("mac_blind", JSONObject().put("round_id", "a1b2c3d4e5f60718").put("blinded", JSONArray(blinded2)).put("blinded_sha256", digest2)
+            .put("mac", Protocol.mac(token, "blind", "a1b2c3d4e5f60718", digest2)))
+        .put("transaction", JSONObject()
+            .put("inputs_in_order", JSONArray(plan4.coins.map { "${it.outpoint} (${it.value})" }))
+            .put("outputs_in_order", JSONArray(plan4.outputs.map { JSONObject().put("script", it.scriptPubKey.toHex()).put("value", it.value) }))
+            .put("fee", plan4.fee).put("txid_before_signing", CoinjoinTx.txid(plan4))))
     println(out.toString(2))
 }

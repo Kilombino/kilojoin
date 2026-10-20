@@ -1,8 +1,8 @@
-# Kilojoin v1, v2 and v3 — protocol
+# Kilojoin v1, v2, v3 and v4 — protocol
 
 Kilojoin is coinjoin for the BLAKE2b chain (BIP-110 + BLAKE2b proof of work). Nobody coordinates it and nobody holds funds: pools are announced on a Nostr relay, and the people in a pool talk through NIP-44 encrypted Nostr events. Each wallet builds the same transaction, checks its own output and change, and signs only its own input. The design follows Joinstr, adapted to how Kilowallet starts a round: people join an open pool, and once enough are in, anyone can ask to close it and the rest vote.
 
-This document describes v1 exactly as implemented in (and what v2 changes in section 10, and v3 in section 11):
+This document describes v1 exactly as implemented in (and what v2 changes in section 10, v3 in section 11 and v4 in section 12):
 
 - Kilowallet (Android): `app/src/main/java/com/kilombino/pyblockwatch/coinjoin/`
   - `Protocol.kt`: constants, messages, hashes
@@ -416,3 +416,60 @@ If not every output is in 60 s after the round's deadline, the round aborts, as 
 - **MAC:** `v3` in [`vectors.json`](vectors.json).
 
 Tested end to end: three Kilowallet wallets on a BLAKE2b regtest node over relay.kilombino.com (`CoinjoinE2ETest.v3BlindOutputs`), mined.
+
+---
+
+## 12. Kilojoin v4 (Kilowallet 1.2.0, Kilojoin 0.8)
+
+v4 lets each person get several mixed outputs of the pool's amount, each to an unused address of their own. Whoever opens the pool picks how many: 1 to 5. Everything not listed here is as in v3 (blind outputs, the creator's own key, MACs, every member checks every seat, several coins per person, Taproot pools).
+
+A pool of **one** output each is still announced as v3, exactly as before, so every v3 wallet can join it. Only pools of 2 to 5 outputs each are v4.
+
+### Pool announcement
+
+- `"v": 4`, with every v3 field (`creator`, `blind_key`, `script`, `max_inputs`) and one more:
+  - `"outputs"`: 2 to 5, the mixed outputs each person gets. Each one is of `denomination`.
+- A wallet that knows only v1–v3 does not list v4 pools (it accepts `v` 1, 2 or 3 only).
+
+### Fees, change and the perfect coin
+
+Per person, with `n` coins, `o` outputs and the pool's type `t` (same sizes as in v2):
+
+```
+fee_share(rate, change, n, t, o) = ceil(rate × (in(t)·n + out(t)·o + (out(t) if change) + 10.5/2))
+change = Σ coins − o·denomination − fee_share(rate, true, n, t, o), if > 294; otherwise 0
+         (and the coins must cover o·denomination + fee_share(rate, false, n, t, o))
+perfect coin = o·denomination + fee_share(rate, false, 1, t, o)
+```
+
+For 4 outputs of 1 000 000 at 1 sat/vB, native SegWit: the fee share without change is 198 sats, so the perfect coin is 4 000 198.
+
+### Seats and joins
+
+Unchanged. The creator checks the change against the formula above, with the pool's `outputs`.
+
+### Blind outputs
+
+1. **`blind`** carries `"blinded"` as an **array** of exactly `outputs` blinded messages, one per mixed output, each made as in v3 (its own 32-byte random prefix, its own blinding factor). The MAC parts are `"blind", round_id, sha256(blinded_1 ‖ … ‖ blinded_o)` in hex, the blinded messages' bytes back to back. With one message this is v3's digest.
+2. **The creator** signs each of them **once per seat**, as in v3: a repeat of the same request gets the same signatures, and a different one is ignored. It answers `blind_sig` with `"sigs"`, an array in the same order (v3 answers with a single `"sig"`).
+3. **The member** unblinds and checks every signature. A wrong one makes it leave the round.
+4. **Each output is handed in on its own**: its own fresh key, its own new relay connection, and its own random wait of 3 to 43 s. The `output` message is as in v3. So the creator can't tell which outputs belong to the same person either.
+5. **The creator** waits for exactly `outputs` × seats valid outputs, then sends `outputs` with the scripts sorted. More than that aborts the round.
+6. **Every member** checks the list: `outputs` × seats scripts, no repeats, all of the pool's type, and each of its own present once.
+
+### Transaction
+
+- Mixed outputs: `outputs` per person, all of `denomination`, sorted by script with the others; then the changes, sorted by script, as before.
+- There may be fewer inputs than mixed outputs; there are at least as many inputs as people.
+- Checks before signing: each of our mixed scripts appears exactly once with `denomination`; at least `outputs × people` outputs carry it; our change is right; `fee ≥ floor(rate × vsize × 0.95)` and `fee ≤ Σ seats fee_share(rate, true, n_seat, t, outputs) + people × 295`.
+
+### Test vectors
+
+`v4` in [`vectors.json`](vectors.json): fee shares and the perfect coin for 2 outputs, a `blind` MAC over two blinded messages, and a 2-person × 2-output transaction in canonical order.
+
+Tested end to end on a BLAKE2b regtest node over relay.kilombino.com:
+- Kilowallet↔Kilowallet: 3 people × 4 outputs of 100 000 (`CoinjoinE2ETest.v4SeveralOutputsEach`). The creator brought its perfect coin and got no change; another person brought two coins. Mined.
+- Kilojoin↔Kilojoin: 3 people × 3 outputs, every output and change in its owner's wallet. Mined.
+- Kilowallet for StartOS/Umbrel opening a 2-output pool, with two Kilojoin joining. Mined.
+- Kilojoin 0.7 (v3) with Kilojoin 0.8, both ways, in a one-output pool. Mined. The 0.7 does not list v4 pools.
+

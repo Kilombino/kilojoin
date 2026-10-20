@@ -106,5 +106,55 @@
     "txid_before_signing": "afcc05514fa042dcf3d1de009d9bf024684fd502f4c13656fa29ca481d866d0a",
     "raw_tx": "0200000000010211111111111111111111111111111111111111111111111111111111111111110000000000fdffffff22222222222222222222222222222222222222222222222222222222222222220100000000fdffffff041027000000000000160014725427b65dc7827b7a7aca250177f8924bd52696102700000000000016001499056d28366a27b236075ab81c2d3a534497eb1341c20000000000001600143d1dbd44f90d85fec7f66b7102a7ba22c38869cc319b000000000000160014cd3c0f574e9c30e2f03a0401fe33fd58bb9c56590247304402201e0daf1a192e525e7a6ad71972721a7f5946a21c1228f65431577486ae42bac402202251433c140b0ed1c89bbc69fd407eb54528278c76c88bc3a24ba0c84f06987221210349d1b113208dbb3f38d71cf6f1f97288f601442272587db220ec71db547c0fac0247304402202d3e105b68343fee767bcd7554b456257bfde766f871d95b245c51d1d04fdf03022078d2b9506df24e9a9eff3b8d7f22328e7ec0f8e0eb8787f173e11ae8a27317fa2121033d936b7f342e8ca685fa46e4b87f966e95c43f0860260a8fd30a41ce40ad115500000000",
     "unified_sighash_input1": "51e142c2e82cc0b6625c5dc9103006d2ac421258292928a8a24d5e71865e3878"
+  },
+  "v4": {
+    "outputs": 2,
+    "fee_share": {
+      "change_for_50000": 29667,
+      "perfect_coin": 20271,
+      "with_change": 333,
+      "without_change": 271
+    },
+    "mac_blind": {
+      "round_id": "a1b2c3d4e5f60718",
+      "blinded_sha256": "1a502ded884cbed7eea871e0a13f00795824ae26ad0fbf08b23c835b69751846",
+      "blinded": [
+        "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      ],
+      "mac": "a660d3f26e5d0a574c098367db592ab05756a8c0c6f9e1f01bf42cc87f7a84b0"
+    },
+    "transaction": {
+      "inputs_in_order": [
+        "1111111111111111111111111111111111111111111111111111111111111111:0 (20271)",
+        "2222222222222222222222222222222222222222222222222222222222222222:1 (50000)"
+      ],
+      "outputs_in_order": [
+        {
+          "value": 10000,
+          "script": "0014725427b65dc7827b7a7aca250177f8924bd52696"
+        },
+        {
+          "value": 10000,
+          "script": "001476323d18fb5d7a55cc28d01b3e6b179ac169fd15"
+        },
+        {
+          "value": 10000,
+          "script": "001478992d57818bc6a7d2a799945bc311cee82d100c"
+        },
+        {
+          "value": 10000,
+          "script": "001499056d28366a27b236075ab81c2d3a534497eb13"
+        },
+        {
+          "value": 29667,
+          "script": "00143d1dbd44f90d85fec7f66b7102a7ba22c38869cc"
+        }
+      ],
+      "fee": 604,
+      "txid_before_signing": "482a05e3802f40b57bc272964073fcbdc5594a52f789656b1660714fc4e4aeef"
+    },
+    "denomination": 10000,
+    "fee_rate": 2
   }
 }

@@ -74,12 +74,12 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         val saved = (0 until a.length()).map { a.getString(it) }
         val live = sessions.values.map { it.state }
             .filter { it.phase == PoolSession.Phase.BROADCAST || it.phase == PoolSession.Phase.CONFIRMED }
-            .map { it.mixScript.toHex() }
+            .flatMap { st -> st.mixScripts.map { it.toHex() } }
         return (saved + live).toSet()
     }
 
     @Synchronized
-    private fun rememberMixed(scriptHex: String) {
+    private fun rememberMixed(scriptHex: Collection<String>) {
         val all = mixedScripts() + scriptHex
         setSetting("mixed_scripts", JSONArray(all.toList()))
     }
@@ -125,42 +125,46 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         return s
     }
 
-    /** A seat's coins (all of [w]'s type) with their keys, and fresh mixed-output and change scripts from [w]. */
+    /**
+     * A seat's coins (all of [w]'s type) with their keys, and fresh scripts from [w]: one per mixed
+     * output the pool gives each person (several in Kilojoin v4), and the change.
+     */
     private class Picked(val coins: List<CoinjoinTx.Coin>, val keys: List<java.math.BigInteger>, val paths: List<String>,
-                         val mix: ByteArray, val change: ByteArray)
+                         val mixes: List<ByteArray>, val change: ByteArray)
 
-    private fun pick(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>): Picked {
+    private fun pick(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, outputs: Int): Picked {
         val master = Wallet.master(secret)
-        return pickNodes(w, cs, cs.map { Bip32Priv.derivePath(master, it.path) })
+        return pickNodes(w, cs, cs.map { Bip32Priv.derivePath(master, it.path) }, outputs)
     }
 
-    private fun pickNodes(w: Wallet, cs: List<Wallet.Coin>, nodes: List<Bip32Priv.ExtendedPrivKey>): Picked {
+    private fun pickNodes(w: Wallet, cs: List<Wallet.Coin>, nodes: List<Bip32Priv.ExtendedPrivKey>, outputs: Int): Picked {
         require(cs.isNotEmpty()) { "pick a coin" }
         require(cs.all { it.type == w.type }) { "all the coins must be of the pool's address type" }
         cs.indices.forEach { require(nodes[it].publicKey().contentEquals(w.pubkey(cs[it].branch, cs[it].index))) { "these words do not match this wallet's key" } }
         val coins = cs.indices.map { CoinjoinTx.Coin(cs[it].txid, cs[it].vout, cs[it].value, nodes[it].publicKey(), w.type) }
-        return Picked(coins, nodes.map { it.key }, cs.map { it.path }, w.fresh(0).second, w.fresh(1).second)
+        return Picked(coins, nodes.map { it.key }, cs.map { it.path }, (0 until outputs).map { w.fresh(0).second }, w.fresh(1).second)
     }
 
     fun create(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
-               hours: Int, password: String?, maxInputs: Int = 1): PoolSession.State {
-        // Kilojoin v3 (blind outputs), like the app since 1.1.5.
+               hours: Int, password: String?, maxInputs: Int = 1, outputs: Int = 1): PoolSession.State {
+        // Kilojoin v3 (blind outputs), like the app since 1.1.5; v4 with several outputs each (1.2.0).
         val np = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
-            w.type, maxInputs, v3 = true)
-        val p = pick(secret, w, cs)
-        return add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mix, p.change,
+            w.type, maxInputs, v3 = true, outputs = outputs)
+        val p = pick(secret, w, cs, outputs)
+        return add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mixes, p.change,
             password?.ifEmpty { null }, np.creatorSecret, np.blindPriv), p.keys).state
     }
 
     fun join(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, terms: Protocol.Terms, password: String?): PoolSession.State {
         require(w.type == terms.script) { "this pool takes ${if (terms.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) "Taproot" else "native SegWit"} coins only" }
         require(cs.size <= terms.maxInputs) { "this pool takes at most ${terms.maxInputs} coin(s) per person" }
-        return joinWith(pick(secret, w, cs), terms, password)
+        return joinWith(pick(secret, w, cs, terms.outputs), terms, password)
     }
 
     private fun joinWith(p: Picked, terms: Protocol.Terms, password: String?): PoolSession.State {
         require(terms.id !in sessions.keys || sessions[terms.id]!!.done) { "you are already in this pool" }
-        return add(PoolSession.newState(terms, false, null, p.coins, p.keys, p.paths, p.mix, p.change,
+        require(p.mixes.size == terms.outputs) { "this pool gives ${terms.outputs} mixed outputs each" }
+        return add(PoolSession.newState(terms, false, null, p.coins, p.keys, p.paths, p.mixes, p.change,
             password?.ifEmpty { null }), p.keys).state
     }
 
@@ -189,12 +193,13 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
             afterExact.remove(op)
             runCatching {
                 val coin = Wallet.Coin(a.txid, a.vout, a.value, rpc.height() - o.getInt("confirmations") + 1, 0, a.index, w.address(0, a.index), a.type)
-                val p = pickNodes(w, listOf(coin), listOf(a.node))
                 val c = a.create
+                val outputs = c?.optInt("outputs", 1) ?: (fetchPools().firstOrNull { it.id == a.poolId }?.outputs ?: 1)
+                val p = pickNodes(w, listOf(coin), listOf(a.node), outputs)
                 if (c != null) {
                     val np = PoolSession.newPool(c.getLong("amount"), c.getDouble("feeRate"), c.getInt("maxPeers"), c.getInt("hours"),
-                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1), v3 = true)
-                    add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mix, p.change, c.optString("password").ifEmpty { null },
+                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1), v3 = true, outputs = outputs)
+                    add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mixes, p.change, c.optString("password").ifEmpty { null },
                         np.creatorSecret, np.blindPriv), p.keys).state
                 } else {
                     val t = fetchPools().firstOrNull { it.id == a.poolId } ?: error("that pool is no longer open")
@@ -277,7 +282,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
             persist()
         }
         override fun event(e: PoolSession.Event) {
-            val pool = "${sats(st.terms.amount)} sats pool"
+            val pool = (if (st.terms.outputs > 1) "${st.terms.outputs} × " else "") + "${sats(st.terms.amount)} sats pool"
             when (e) {
                 is PoolSession.Event.Changed -> {}
                 is PoolSession.Event.DidAlone -> {}   // the app's way of running on its own; here the events below do it
@@ -305,8 +310,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                     else emit("Coinjoin: sign now", "$pool · the transaction is ready to sign" +
                         (if (autoSign) " (Kilojoin restarted: unlock it to sign)" else ""), st.poolId)
                 }
-                is PoolSession.Event.Broadcast -> { roundKeys.remove(st.poolId); rememberMixed(st.mixScript.toHex()); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
-                is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScript.toHex()); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Broadcast -> { roundKeys.remove(st.poolId); rememberMixed(st.mixScripts.map { it.toHex() }); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScripts.map { it.toHex() }); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
                 is PoolSession.Event.Aborted -> { roundKeys.remove(st.poolId); emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId) }
                 is PoolSession.Event.ExpiringSoon -> emit("Coinjoin: under an hour left",
                     "$pool · ${e.peers}/${st.terms.maxPeers} people, enough to mix. It expires in ${e.minutes} min: ask to close now.", st.poolId)

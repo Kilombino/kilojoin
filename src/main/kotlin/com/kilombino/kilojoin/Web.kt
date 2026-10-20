@@ -144,7 +144,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                 val pw = walletFor(type)
                 val cs = coins(pw, b)
                 val st = engine.create(s!!, pw, cs, b.getLong("amount"), b.getDouble("feeRate"), b.optInt("minPeers", 2),
-                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), b.optInt("maxInputs", 1))
+                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), b.optInt("maxInputs", 1), b.optInt("outputs", 1))
                 reply(ex, 200, JSONObject().put("pool", st.poolId))
             }
             "/api/join" -> {
@@ -277,8 +277,9 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
     private fun termsJson(t: Protocol.Terms) = JSONObject()
         .put("id", t.id).put("amount", t.amount).put("feeRate", t.feeRate).put("peers", t.peers)
         .put("minPeers", t.minPeers).put("maxPeers", t.maxPeers).put("expiresAt", t.expiresAt).put("private", t.private)
-        .put("feeWithChange", CoinjoinTx.feeShare(t.feeRate, true, 1, t.script)).put("feeNoChange", CoinjoinTx.feeShare(t.feeRate, false, 1, t.script))
-        .put("script", Protocol.scriptName(t.script)).put("maxInputs", t.maxInputs).put("version", t.version)
+        .put("feeWithChange", CoinjoinTx.feeShare(t.feeRate, true, 1, t.script, t.outputs))
+        .put("feeNoChange", CoinjoinTx.feeShare(t.feeRate, false, 1, t.script, t.outputs))
+        .put("script", Protocol.scriptName(t.script)).put("maxInputs", t.maxInputs).put("version", t.version).put("outputs", t.outputs)
         .put("inputFee", kotlin.math.ceil(t.feeRate * CoinjoinTx.inputVb(t.script)).toLong())
 
     private fun status(): JSONObject {
@@ -308,7 +309,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
     private fun stateJson(st: PoolSession.State): JSONObject {
         val plan = engine.session(st.poolId)?.plan()
         val people = if (st.round.isNotEmpty()) st.round.size else st.seats.size
-        return JSONObject().put("id", st.poolId).put("amount", st.terms.amount).put("feeRate", st.terms.feeRate)
+        return JSONObject().put("id", st.poolId).put("amount", st.terms.amount).put("feeRate", st.terms.feeRate).put("outputs", st.terms.outputs)
             .put("creator", st.creator).put("private", st.terms.private).put("phase", st.phase.name).put("reason", st.reason)
             .put("people", people).put("minPeers", st.terms.minPeers).put("maxPeers", st.terms.maxPeers)
             .put("expiresAt", st.terms.expiresAt).put("phaseDeadline", st.phaseDeadline).put("voteDeadline", st.voteDeadline)
