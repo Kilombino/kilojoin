@@ -203,7 +203,7 @@ function homeScreen() {
       <div class="row"><div><label>${joining.outputs > 1 ? "amount of each output (sats)" : "amount per person (sats)"}</label><input id="c-amount" value="${joining.amount}"></div><div><label>fee (sat/vB)</label><input id="c-rate" value="${joining.feeRate}"></div></div>
       <div class="row"><div><label>fewest people</label><input id="c-min" value="2"></div><div><label>most people</label><input id="c-max" value="5"></div><div><label>open for (hours)</label><input id="c-hours" value="6"></div></div>
       <label>most coins per person (1–10)</label><input id="c-inputs" value="${joining.maxInputs}">
-      <p class="small">Blind outputs (Kilojoin v3): when the round closes, nobody, not even you as its creator, can tell whose mixed output is whose. Only Kilowallet 1.1.5+ and Kilojoin 0.7+ see this pool.</p>
+      <p class="small">Blind outputs: when the round closes, nobody, not even you as its creator, can tell whose mixed output is whose.${joining.outputs > 1 ? "" : " Kilowallet 1.1.5+ and Kilojoin 0.7+ see this pool."}</p>
       <label>password (optional: makes it private 🔒)</label><input id="c-pw">`;
     else if (joining.private) h += `<label>🔒 pool password</label><input id="c-pw">`;
     h += `<p class="faint">Each person pays ${sats(feeWithChange(joining.feeRate, joining.script, 1, joining.outputs))} sats with change, ${sats(feeNoChange(joining.feeRate, joining.script, 1, joining.outputs))} without, with one coin; each extra coin adds ${sats(Math.ceil(joining.feeRate * inVb(joining.script)))}.</p>
