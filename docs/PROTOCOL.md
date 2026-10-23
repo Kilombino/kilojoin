@@ -98,11 +98,12 @@ A seat is a member's coin and change, as everybody sees it:
 ### Pool → joiner (direct)
 
 ```json
-{"type":"welcome","pool_secret":"<hex>","token":"<32 hex>","seq":3}
+{"type":"welcome","pool_secret":"<64 hex>","token":"<32 hex>","seq":3}
 {"type":"reject","reason":"…"}
 ```
 
 - The joiner checks that `pubOf(pool_secret) == pool pub`. Anyone can write to a join key, but only the real pool knows that secret.
+- `pool_secret` is the key as 64 hex characters. Kilowallet before 1.2.4 and Kilojoin before 0.9 sent it without leading zeros (about one pool in sixteen has fewer than 64): read it as a number, or left-pad it with `0` to 64 before decoding.
 - `token` is the member's seat secret. Only `sha256("kilojoin/v1/token|" + token)` (the `token_hash`) appears in rosters.
 - `seq` is the number of the roster that holds the new seat.
 
@@ -382,6 +383,7 @@ Only the creator, who keeps every seat's token, can check them. A member's `clos
 ### Roster: every member checks every seat
 
 - Each seat in `roster` and `closing` also carries `"join_pub"` (the key it joined with; for the creator's own seat, the pool key) and `"proofs"` (its ownership proofs, one per coin, as in the join).
+- For the creator's own seat, `join_pub` is the **pool key**, so its proofs are checked with the pool pub, not with `creator`.
 - On every roster, each member checks every seat against the chain, as the creator did when it let the seat in:
   - the proofs: `checkOwnership(pool id, join_pub, coin, proof)`, the v1 ownership message signed for that join key;
   - every coin: unspent, with the stated value and script.
