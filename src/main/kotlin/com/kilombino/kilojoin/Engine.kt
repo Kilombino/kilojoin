@@ -32,7 +32,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     /** The unlocked wallet's words, for signing on its own (null while locked). */
     @Volatile var secretProvider: () -> Vault.Secret? = { null }
 
-    private fun sats(v: Long) = "%,d".format(v).replace(',', ' ')
+    private fun sats(v: Long) = "%,d".format(java.util.Locale.ROOT, v).replace(',', ' ')
 
     // ------------------------------------------------------------------ settings
 
@@ -74,8 +74,22 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         val saved = (0 until a.length()).map { a.getString(it) }
         val live = sessions.values.map { it.state }
             .filter { it.phase == PoolSession.Phase.BROADCAST || it.phase == PoolSession.Phase.CONFIRMED }
+            // A payment's outputs are the recipients' coins, not ours.
+            .filter { !isPay(it.poolId) }
             .flatMap { st -> st.mixScripts.map { it.toHex() } }
         return (saved + live).toSet()
+    }
+
+    /**
+     * Pools opened to pay through them (from SEND, as Kilowallet since 1.2.7): their outputs for us
+     * went to the recipients' own addresses. Kept in settings, only on this node.
+     */
+    fun isPay(poolId: String): Boolean = settings().optJSONObject("pay_pools")?.has(poolId) == true
+    @Synchronized private fun rememberPay(poolId: String) {
+        val o = settings().optJSONObject("pay_pools") ?: JSONObject()
+        val weekAgo = System.currentTimeMillis() / 1000 - 8 * 86400
+        val kept = JSONObject(); for (k in o.keys()) if (o.optLong(k) > weekAgo) kept.put(k, o.optLong(k))
+        kept.put(poolId, System.currentTimeMillis() / 1000); setSetting("pay_pools", kept)
     }
 
     @Synchronized
@@ -145,14 +159,29 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         return Picked(coins, nodes.map { it.key }, cs.map { it.path }, (0 until outputs).map { w.fresh(0).second }, w.fresh(1).second)
     }
 
+    /**
+     * [payTo]: a payment through the pool (from SEND), the recipients' scripts as our outputs, one
+     * each; with [payments] it is a payment pool (Kilojoin v5): those amounts are paid, summing to
+     * [outputs] × [amount], what each of the others gets back in equal outputs.
+     */
     fun create(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
-               hours: Int, password: String?, maxInputs: Int = 1, outputs: Int = 1): PoolSession.State {
-        // Kilojoin v3 (blind outputs), like the app since 1.1.5; v4 with several outputs each (1.2.0).
+               hours: Int, password: String?, maxInputs: Int = 1, outputs: Int = 1,
+               payTo: List<ByteArray>? = null, payments: List<Long> = emptyList()): PoolSession.State {
+        // Kilojoin v3 (blind outputs), like the app since 1.1.5; v4 with several outputs each (1.2.0); v5 payments (1.2.7).
         val np = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
-            w.type, maxInputs, v3 = true, outputs = outputs)
-        val p = pick(secret, w, cs, outputs)
-        return add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mixes, p.change,
+            w.type, maxInputs, v3 = true, outputs = outputs, payments = payments)
+        // A payment's outputs are the recipients': no address of ours is handed out for them.
+        val p = pick(secret, w, cs, if (payTo != null) 0 else outputs).let { p ->
+            if (payTo == null) p else {
+                require(payTo.size == (if (payments.isEmpty()) outputs else payments.size)) { "one recipient per output" }
+                require(payTo.all { CoinjoinTx.isType(it, w.type) }) { "the recipients' addresses are not of the pool's type" }
+                Picked(p.coins, p.keys, p.paths, payTo, p.change)
+            }
+        }
+        val st = add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mixes, p.change,
             password?.ifEmpty { null }, np.creatorSecret, np.blindPriv), p.keys).state
+        if (payTo != null) rememberPay(st.poolId)
+        return st
     }
 
     fun join(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, terms: Protocol.Terms, password: String?): PoolSession.State {
@@ -231,7 +260,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
         val now = System.currentTimeMillis() / 1000
         // A pool not re-announced for a while has lost its creator: nobody would let us in.
         return found.values.filter {
-            it.state == "open" && it.expiresAt > now && it.peers < it.maxPeers && it.amount >= Protocol.MIN_AMOUNT &&
+            // Below the minimum per person in all (amount × outputs) a pool is only a test, as in Kilowallet 1.2.7.
+            it.state == "open" && it.expiresAt > now && it.peers < it.maxPeers && !Protocol.isTest(it) &&
                 now - it.createdAt < Protocol.STALE_AFTER
         }
             .sortedByDescending { it.createdAt }
@@ -246,8 +276,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 val pools = fetchPools(86400).filter { it.createdAt > last && it.id !in sessions.keys && !it.private }
                 pools.maxOfOrNull { it.createdAt }?.let { setSetting("last_pool_seen", it) }
                 pools.take(3).forEach { t -> emit("New coinjoin pool",
-                    "${sats(t.amount)} sats${if (t.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) " · Taproot" else ""} · " +
-                        "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
+                    "${if (t.outputs > 1) "${t.outputs} × " else ""}${sats(t.amount)} sats${if (t.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) " · Taproot" else ""} · " +
+                        (if (t.v5) "a payment pool · " else "") + "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
             }
         }, 20, 300, TimeUnit.SECONDS)
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({ runCatching { checkExact() } }, 30, 30, TimeUnit.SECONDS)
@@ -282,7 +312,9 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
             persist()
         }
         override fun event(e: PoolSession.Event) {
-            val pool = (if (st.terms.outputs > 1) "${st.terms.outputs} × " else "") + "${sats(st.terms.amount)} sats pool"
+            val pay = isPay(st.poolId)
+            val pool = if (st.terms.v5 && st.creator) "payment pool, ${sats(st.terms.mixTotal)} sats to ${st.terms.payments.size} recipient(s)"
+                else (if (st.terms.outputs > 1) "${st.terms.outputs} × " else "") + "${sats(st.terms.amount)} sats pool" + (if (pay) " (a payment)" else "")
             when (e) {
                 is PoolSession.Event.Changed -> {}
                 is PoolSession.Event.DidAlone -> {}   // the app's way of running on its own; here the events below do it
@@ -310,9 +342,12 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                     else emit("Coinjoin: sign now", "$pool · the transaction is ready to sign" +
                         (if (autoSign) " (Kilojoin restarted: unlock it to sign)" else ""), st.poolId)
                 }
-                is PoolSession.Event.Broadcast -> { roundKeys.remove(st.poolId); rememberMixed(st.mixScripts.map { it.toHex() }); emit("Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
-                is PoolSession.Event.Confirmed -> { rememberMixed(st.mixScripts.map { it.toHex() }); rescanSoon(); emit("Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
-                is PoolSession.Event.Aborted -> { roundKeys.remove(st.poolId); emit("Coinjoin cancelled", "$pool · ${e.reason}. Your coin did not move.", st.poolId) }
+                is PoolSession.Event.Broadcast -> { roundKeys.remove(st.poolId); if (!pay) rememberMixed(st.mixScripts.map { it.toHex() })
+                    emit(if (pay) "Coinjoin sent: the payment left" else "Coinjoin sent", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Confirmed -> { if (!pay) rememberMixed(st.mixScripts.map { it.toHex() }); rescanSoon()
+                    emit(if (pay) "Coinjoin confirmed: paid" else "Coinjoin confirmed", "$pool · ${e.txid}", st.poolId) }
+                is PoolSession.Event.Aborted -> { roundKeys.remove(st.poolId)
+                    emit("Coinjoin cancelled", "$pool · ${e.reason}. " + (if (pay) "Nothing was paid: send it normally if you like." else "Your coin did not move."), st.poolId) }
                 is PoolSession.Event.ExpiringSoon -> emit("Coinjoin: under an hour left",
                     "$pool · ${e.peers}/${st.terms.maxPeers} people, enough to mix. It expires in ${e.minutes} min: ask to close now.", st.poolId)
             }

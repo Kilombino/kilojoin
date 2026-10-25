@@ -1,8 +1,8 @@
-# Kilojoin v1, v2, v3 and v4 — protocol
+# Kilojoin v1, v2, v3, v4 and v5 — protocol
 
 Kilojoin is coinjoin for the BLAKE2b chain (BIP-110 + BLAKE2b proof of work). Nobody coordinates it and nobody holds funds: pools are announced on a Nostr relay, and the people in a pool talk through NIP-44 encrypted Nostr events. Each wallet builds the same transaction, checks its own output and change, and signs only its own input. The design follows Joinstr, adapted to how Kilowallet starts a round: people join an open pool, and once enough are in, anyone can ask to close it and the rest vote.
 
-This document describes v1 exactly as implemented in (and what v2 changes in section 10, v3 in section 11 and v4 in section 12):
+This document describes v1 exactly as implemented in (and what v2 changes in section 10, v3 in section 11, v4 in section 12 and v5 in section 13):
 
 - Kilowallet (Android): `app/src/main/java/com/kilombino/pyblockwatch/coinjoin/`
   - `Protocol.kt`: constants, messages, hashes
@@ -475,3 +475,55 @@ Tested end to end on a BLAKE2b regtest node over relay.kilombino.com:
 - Kilowallet for StartOS/Umbrel opening a 2-output pool, with two Kilojoin joining. Mined.
 - Kilojoin 0.7 (v3) with Kilojoin 0.8, both ways, in a one-output pool. Mined. The 0.7 does not list v4 pools.
 
+---
+
+## 13. Kilojoin v5 (Kilowallet 1.2.7, Kilojoin 0.9): payment pools
+
+v5 lets whoever opens a pool pay 1 to 5 recipients of **different** amounts through it. The others put in the same total and get it back in equal outputs. Everything not listed here is as in v4 (blind outputs, the creator's own key, MACs, every member checks every seat, several coins per person, Taproot pools).
+
+What it hides: which coins paid (among the members, all the more with perfect coins) and which joiner got which output. What it can't hide: the payments themselves, odd amounts that belong to one person.
+
+### Pool announcement
+
+- `"v": 5`, with every v4 field and one more:
+  - `"payments"`: an array of 1 to 5 amounts in sats, each at least 330 (the dust limit of a Taproot output), summing to exactly `outputs × denomination`. Only the amounts: the recipients' addresses stay with the creator until the round closes.
+  - `"outputs"`: 1 to 5 (one is allowed in v5): the equal outputs each **joiner** gets, each of `denomination`.
+- A pool whose payments don't add up, or with dust, too many or none, is not listed.
+- A wallet that knows only v1–v4 does not list v5 pools.
+
+### The minimum per person
+
+Since Kilowallet 1.2.7 and Kilojoin 0.9 the minimum is per person **in all**: `outputs × denomination ≥ 10 000`, with each output of at least 1 000. Below that a pool is a test pool: wallets don't list it or open one (2 × 5 000 is a pool; 3 × 3 000 is a test). This applies to v3 and v4 pools too.
+
+### Fees, change and the perfect coin
+
+As in v4, but the creator's seat pays its fee share for its **payment outputs**: with `p` payments,
+
+```
+creator change = Σ coins − Σ payments − fee_share(rate, true, n, t, p), if > 294; otherwise 0
+joiner perfect coin = outputs·denomination + fee_share(rate, false, 1, t, outputs)
+```
+
+### Joining and blind outputs
+
+Joiners join and hand in their `outputs` blind outputs exactly as in v4. The creator does not ask itself for blind signatures: its outputs are the payments. Once the joiners' `(seats − 1) × outputs` outputs are in, the creator sends `outputs` with one more field:
+
+- `"payments"`: an array of `{"script": hex, "value": sats}`, one per announced payment.
+
+Every member checks it: the values are exactly the announced ones (as a multiset), every script is of the pool's type, none repeats, and none is one of the mixed outputs. Otherwise it leaves the round. A round closed without the creator's seat is aborted.
+
+### Transaction
+
+- The joiners' mixed outputs sorted by script; then the changes and the payments together, sorted by script.
+- Checks before signing, by every member: its own outputs are there once with their exact values (a joiner's mixed outputs, or the creator's payments); its change is right; the transaction has exactly `(seats − 1) × outputs` outputs of `denomination`, the announced payments (each once) and the changes, nothing else; the coins match the seats; `fee ≥ floor(rate × vsize × 0.95)` and `fee ≤ Σ seats fee_share(rate, true, n_seat, t, o_seat) + seats × 295`, with `o_seat` the number of payments for the creator's seat and `outputs` for the others.
+
+### Test vectors
+
+`v5` in [`vectors.json`](vectors.json): a creator paying 7 123 and 12 877, a joiner with a perfect coin getting 2 × 10 000, the creator's fee shares, the `payments` list as sent, and the transaction in canonical order (it passes the checks above).
+
+Tested end to end on a BLAKE2b regtest node over relay.kilombino.com:
+- Kilowallet for StartOS/Umbrel (0.9.0) opening a payment pool from SEND (37 123 + 62 877, 2 × 50 000 for the others), Kilojoin joining. Mined; the recipients got exactly their payments.
+- The app's protocol code opening a payment pool (12 345 + 7 655, 2 × 10 000), Kilojoin joining. Mined.
+- The app's protocol code opening a payment pool (30 000 + 15 000, one output of 45 000 each), Kilowallet for StartOS and Kilojoin joining. Mined.
+- Kilojoin opening a payment pool to three recipients (11 000 + 2 500 + 16 500, 3 × 10 000), the app's protocol code joining. Mined.
+- A 2 × 5 000 pool (Kilowallet for StartOS and Kilojoin) mined; a 3 × 3 000 pool was listed by neither, and both refuse to open one.

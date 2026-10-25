@@ -127,5 +127,27 @@ fun main() {
             .put("inputs_in_order", JSONArray(plan4.coins.map { "${it.outpoint} (${it.value})" }))
             .put("outputs_in_order", JSONArray(plan4.outputs.map { JSONObject().put("script", it.scriptPubKey.toHex()).put("value", it.value) }))
             .put("fee", plan4.fee).put("txid_before_signing", CoinjoinTx.txid(plan4))))
+    // --- v5: a payment pool. The creator (A) pays two recipients of different amounts; B puts in
+    // the same total and gets it back in two equal outputs. A's fee share counts its two payments.
+    val pays5 = listOf(7_123L, 12_877L)                              // S = 20 000
+    val (d5, k5) = Protocol.v5Split(pays5.sum(), 2)                  // 2 × 10 000 for B
+    val payTo5 = listOf(byteArrayOf(0x00, 0x14) + Hashes.hash160(pub33(key(9))), byteArrayOf(0x00, 0x14) + Hashes.hash160(pub33(key(10))))
+    val coinA5 = coinA.copy(value = 50_000)
+    val changeA5 = CoinjoinTx.changeOf(coinA5.value, pays5.sum(), feeRate, 1, outputs = pays5.size)!!
+    val coinB5 = coinB.copy(value = CoinjoinTx.minimumCoin(d5, feeRate, outputs = k5))   // B's perfect coin: no change
+    val plan5 = CoinjoinTx.plan(listOf(coinA5, coinB5), mixB2, listOf(TxBuilder.Output(chA, changeA5)), d5, k5,
+        pays5.indices.map { TxBuilder.Output(payTo5[it], pays5[it]) })
+    out.put("v5", JSONObject().put("payments", JSONArray(pays5)).put("denomination", d5).put("outputs", k5).put("fee_rate", feeRate)
+        .put("creator_fee_share", JSONObject().put("with_change", CoinjoinTx.feeShare(feeRate, true, 1, outputs = pays5.size))
+            .put("without_change", CoinjoinTx.feeShare(feeRate, false, 1, outputs = pays5.size))
+            .put("change_for_50000", changeA5))
+        .put("joiner_perfect_coin", CoinjoinTx.minimumCoin(d5, feeRate, outputs = k5))
+        .put("payments_message", JSONArray(pays5.indices.map { JSONObject().put("script", payTo5[it].toHex()).put("value", pays5[it]) }))
+        .put("transaction", JSONObject()
+            .put("inputs_in_order", JSONArray(plan5.coins.map { "${it.outpoint} (${it.value})" }))
+            .put("outputs_in_order", JSONArray(plan5.outputs.map { JSONObject().put("script", it.scriptPubKey.toHex()).put("value", it.value) }))
+            .put("fee", plan5.fee).put("txid_before_signing", CoinjoinTx.txid(plan5))
+            .put("check", CoinjoinTx.checkPayment(plan5, mixB2.map { TxBuilder.Output(it, d5) }, null, d5, feeRate, listOf(1, 1),
+                listOf(pays5.size, k5), k5, pays5, 1) ?: "ok")))
     println(out.toString(2))
 }

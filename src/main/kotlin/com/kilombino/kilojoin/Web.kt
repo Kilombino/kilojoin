@@ -140,12 +140,49 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                 reply(ex, if (r.isSuccess) 200 else 400, if (r.isSuccess) ok() else err(r.exceptionOrNull()?.message ?: "failed"))
             }
             "/api/create" -> {
-                val type = Protocol.parseScript(b.optString("script", "p2wpkh")) ?: error("unknown address type")
+                // A payment from SEND (as Kilowallet since 1.2.7): its recipients, each with its amount.
+                val pay = b.optJSONArray("pay")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) }.map { it.getString("to").trim() to it.getLong("amount") } }
+                val payV5 = pay != null && b.optBoolean("paymentPool")
+                val check = pay?.let { CoinjoinPay.check(it, walletTr != null) }
+                if (check != null) require(if (payV5) check.paymentOk else check.ok) { check.reason ?: "these payments can't go through one pool" }
+                val type = check?.type ?: Protocol.parseScript(b.optString("script", "p2wpkh")) ?: error("unknown address type")
                 val pw = walletFor(type)
                 val cs = coins(pw, b)
-                val st = engine.create(s!!, pw, cs, b.getLong("amount"), b.getDouble("feeRate"), b.optInt("minPeers", 2),
-                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), b.optInt("maxInputs", 1), b.optInt("outputs", 1))
-                reply(ex, 200, JSONObject().put("pool", st.poolId))
+                val rate = b.getDouble("feeRate")
+                require(rate in 1.0..500.0) { "fee: 1 to 500 sat/vB" }
+                val maxInputs = b.optInt("maxInputs", 1)
+                require(maxInputs in 1..Protocol.MAX_INPUTS && cs.size <= maxInputs) { "at most $maxInputs coin(s) per person in this pool" }
+                // v5: the payments' total split for the others, the outputs asked for when it splits evenly, else one.
+                val split = if (payV5) Protocol.v5Split(check!!.amounts.sum(), b.optInt("outputs", 1)) else null
+                val outputs = split?.second ?: if (pay != null) pay.size else b.optInt("outputs", 1)
+                require(outputs in 1..Protocol.MAX_OUTPUTS) { "mixed outputs per person: 1 to ${Protocol.MAX_OUTPUTS}" }
+                // From whole coins: the amount worked out so they go in with no change (Kilowallet 1.2.7).
+                val fromCoins = pay == null && b.optBoolean("fromCoins")
+                val amount = when {
+                    split != null -> split.first
+                    pay != null -> check!!.amount
+                    fromCoins -> CoinjoinTx.noChangeAmount(cs.sumOf { it.value }, cs.size, rate, pw.type, outputs) ?: error("these coins don't even cover the fee")
+                    else -> b.getLong("amount")
+                }
+                require(amount in Protocol.TEST_MIN_AMOUNT..Protocol.MAX_AMOUNT) { "amount per output: ${Protocol.TEST_MIN_AMOUNT} to ${Protocol.MAX_AMOUNT} sats (1 BTC)" }
+                // The minimum is per person in all, amount × outputs: below it a pool is only a test.
+                require(amount * outputs >= Protocol.MIN_AMOUNT) { "$amount × $outputs = ${amount * outputs} sats each: a pool takes at least ${Protocol.MIN_AMOUNT} each in all" }
+                val payments = if (payV5) check!!.amounts else emptyList()
+                require(CoinjoinTx.changeOf(cs.sumOf { it.value }, amount * outputs, rate, cs.size, pw.type, if (payV5) payments.size else outputs) != null) {
+                    "these coins are too small for this pool"
+                }
+                val st = engine.create(s!!, pw, cs, amount, rate, b.optInt("minPeers", 2),
+                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), maxInputs, outputs, check?.scripts, payments)
+                reply(ex, 200, JSONObject().put("pool", st.poolId).put("amount", amount).put("outputs", outputs))
+            }
+            // Whether SEND's recipients can be paid through a pool, and how (Kilowallet's rule).
+            "/api/pay/check" -> {
+                val a = b.getJSONArray("recipients")
+                val r = (0 until a.length()).map { a.getJSONObject(it) }.map { it.optString("to").trim() to it.optLong("amount", 0) }
+                val c = CoinjoinPay.check(r, walletTr != null)
+                reply(ex, 200, JSONObject().put("ok", c.ok).put("paymentOk", c.paymentOk).put("any", c.any).put("reason", c.reason ?: JSONObject.NULL)
+                    .put("type", c.type?.let { Protocol.scriptName(it) } ?: JSONObject.NULL).put("amount", c.amount)
+                    .put("amounts", JSONArray(c.amounts)).put("total", c.amounts.sum()))
             }
             "/api/join" -> {
                 val t = pools.firstOrNull { it.id == b.getString("pool") } ?: error("that pool is no longer open")
@@ -197,7 +234,10 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             allCoins().firstOrNull { it.outpoint == op } ?: error("A ticked coin is gone: scan again.")
         }
         val amount = b.optLong("amount", 0L).takeIf { it > 0 }
-        val d = Spend.plan(coins, b.getString("address"), amount, b.getDouble("feeRate"), w.nextChangeScript())
+        // More recipients, paid by the same transaction.
+        val more = b.optJSONArray("more")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) }.map { it.getString("address").trim() to it.optLong("amount", 0) } }
+            ?: emptyList()
+        val d = Spend.plan(coins, b.getString("address"), amount, b.getDouble("feeRate"), w.nextChangeScript(), more)
         val mixed = engine.mixedScripts()
         val nMixed = coins.count { scriptOf(it) in mixed }
         val warn = when {
@@ -213,6 +253,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         .put("address", d.toAddress).put("amount", d.amount).put("change", d.change).put("fee", d.fee)
         .put("vbytes", d.vbytes).put("feeRate", d.feeRate).put("inputs", d.coins.size)
         .put("total", d.coins.sumOf { it.value }).put("warning", warn ?: JSONObject.NULL)
+        .put("sent", d.total).put("more", JSONArray(d.extra.map { (a, o) -> JSONObject().put("address", a).put("amount", o.value) }))
 
     private fun coin(w: Wallet, outpoint: String): Wallet.Coin {
         require(outpoint !in engine.lockedOutpoints()) { "that coin is already in a round" }
@@ -281,6 +322,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         .put("feeNoChange", CoinjoinTx.feeShare(t.feeRate, false, 1, t.script, t.outputs))
         .put("script", Protocol.scriptName(t.script)).put("maxInputs", t.maxInputs).put("version", t.version).put("outputs", t.outputs)
         .put("inputFee", kotlin.math.ceil(t.feeRate * CoinjoinTx.inputVb(t.script)).toLong())
+        .put("v5", t.v5).put("payments", JSONArray(t.payments)).put("mixTotal", t.mixTotal)
 
     private fun status(): JSONObject {
         val ws = wallets()
@@ -288,6 +330,9 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         val o = JSONObject().put("setup", true).put("unlocked", secret != null)
             .put("height", runCatching { rpc.height() }.getOrDefault(0))
             .put("relay", Protocol.RELAY).put("notify_new_pools", engine.notifyNewPools)
+            .put("limits", JSONObject().put("minAmount", Protocol.MIN_AMOUNT).put("maxAmount", Protocol.MAX_AMOUNT)
+                .put("testMinAmount", Protocol.TEST_MIN_AMOUNT).put("minPayment", Protocol.MIN_PAYMENT).put("maxOutputs", Protocol.MAX_OUTPUTS)
+                .put("maxInputs", Protocol.MAX_INPUTS))
             .put("auto_sign", engine.autoSign).put("telegram", settingsJson())
             .put("waitingExact", JSONArray(engine.waitingExact().map { JSONObject().put("value", it.value).put("create", it.create != null) }))
         if (ws.isNotEmpty()) {
@@ -319,5 +364,10 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             .put("voted", st.votedOn != null && st.votedOn == st.voteId)
             .put("signed", st.postedSig).put("sigs", st.sigs.size).put("txid", st.txid ?: "")
             .put("planFee", plan?.fee ?: 0).put("planPeople", st.round.size).put("planCoins", plan?.coins?.size ?: 0)
+            .put("v5", st.terms.v5).put("payments", JSONArray(st.terms.payments)).put("mixTotal", st.terms.mixTotal)
+            // A payment through the pool: what it pays and to whom (only on this node, never announced).
+            .put("pay", engine.isPay(st.poolId))
+            .put("recipients", if (!engine.isPay(st.poolId)) JSONArray() else JSONArray(st.mixScripts.mapIndexed { i, sp ->
+                JSONObject().put("address", Spend.addressOf(sp)).put("amount", if (st.terms.v5 && st.creator) st.terms.payments.getOrElse(i) { 0L } else st.terms.amount) }))
     }
 }

@@ -156,5 +156,61 @@
     },
     "denomination": 10000,
     "fee_rate": 2
+  },
+  "v5": {
+    "outputs": 2,
+    "creator_fee_share": {
+      "change_for_50000": 29667,
+      "with_change": 333,
+      "without_change": 271
+    },
+    "payments": [
+      7123,
+      12877
+    ],
+    "payments_message": [
+      {
+        "value": 7123,
+        "script": "0014129f5a798c08e0b26212af9899be01f1875590a2"
+      },
+      {
+        "value": 12877,
+        "script": "00148b3f1e102816c2fb459cd77fa7f83edcf428097a"
+      }
+    ],
+    "joiner_perfect_coin": 20271,
+    "transaction": {
+      "inputs_in_order": [
+        "1111111111111111111111111111111111111111111111111111111111111111:0 (50000)",
+        "2222222222222222222222222222222222222222222222222222222222222222:1 (20271)"
+      ],
+      "outputs_in_order": [
+        {
+          "value": 10000,
+          "script": "0014725427b65dc7827b7a7aca250177f8924bd52696"
+        },
+        {
+          "value": 10000,
+          "script": "001476323d18fb5d7a55cc28d01b3e6b179ac169fd15"
+        },
+        {
+          "value": 7123,
+          "script": "0014129f5a798c08e0b26212af9899be01f1875590a2"
+        },
+        {
+          "value": 12877,
+          "script": "00148b3f1e102816c2fb459cd77fa7f83edcf428097a"
+        },
+        {
+          "value": 29667,
+          "script": "0014cd3c0f574e9c30e2f03a0401fe33fd58bb9c5659"
+        }
+      ],
+      "fee": 604,
+      "txid_before_signing": "090621fbbac0785ad698599d60e1dbc4883bfc3f75ef5742996e3fa245ac2db7",
+      "check": "ok"
+    },
+    "denomination": 10000,
+    "fee_rate": 2
   }
 }

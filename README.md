@@ -7,7 +7,8 @@ Coinjoin on BTC (the BLAKE2b chain) from your own node, in the same pools as the
   `coinjoin/` and `crypto/` packages are compiled straight into this server.
 - Same relay, `wss://relay.kilombino.com`, so servers and phones meet in the same pools.
 - A web page to import or create a BIP-39 wallet (native SegWit BIP84 and Taproot BIP86 accounts, both always scanned), receive on either, send with coin control,
-  prepare an exact coin for a pool, open or join pools, vote and sign. Coins are labelled
+  prepare an exact coin for a pool, open a pool from whole coins with no change or join pools, vote and sign;
+  pay up to five recipients through a new pool (a payment pool, Kilojoin v5, when the amounts differ). Coins are labelled
   "mixed" (a coinjoin output) or "change", and a send that would link a mixed coin to
   others asks first. Spends are signed with the unified sighash (0x21), like Kilowallet. The words are stored encrypted with your password
   (PBKDF2-SHA256 600,000 rounds + AES-GCM).
@@ -19,7 +20,7 @@ On StartOS, install it from the Kilombino Registry (package `kilojoin`, wrapper 
 
 ## Protocol
 
-[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1, v2 (Taproot pools, several coins per person) and v3 (blind outputs: nobody, not even the pool's creator, can tell whose mixed output is whose) for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
+[docs/PROTOCOL.md](docs/PROTOCOL.md) describes Kilojoin v1, v2 (Taproot pools, several coins per person) v3 (blind outputs: nobody, not even the pool's creator, can tell whose mixed output is whose), v4 (several mixed outputs per person) and v5 (payment pools: the creator pays recipients of different amounts, the others get the same total back in equal outputs) for other implementations, with test vectors in [docs/vectors.json](docs/vectors.json).
 
 ## Build and run
 
