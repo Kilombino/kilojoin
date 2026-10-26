@@ -99,7 +99,7 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     }
 
     /** Rescan the wallet off the caller's thread (after a round goes out or confirms). */
-    private fun rescanSoon() { Thread { walletProvider().forEach { w -> runCatching { w.scan() } } }.start() }
+    private fun rescanSoon() { Thread { runCatching { Wallet.scanAll(rpc, walletProvider()) } }.start() }
 
     // ------------------------------------------------------------------ persistence
 

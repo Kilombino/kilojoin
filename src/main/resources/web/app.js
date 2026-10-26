@@ -285,14 +285,21 @@ const sendBody = () => Object.assign({ coins: sending.coins, address: sending.ad
   more: sending.more.map((m) => ({ address: m.address, amount: parseInt(m.amount) || 0 })) },
   sending.exact && sending.after ? { after: sending.after, exactIndex: sending.index, exactType: sending.type } : {});
 
+// The balance comes from the node walking its whole UTXO set: say how far it is, or why it failed.
+function scanLine() {
+  if (st.scanning) return `the node is scanning its UTXO set${st.scanProgress != null ? " · " + Math.floor(st.scanProgress) + " %" : ""} (on a small machine this can take a long while)`;
+  if (st.scanError) return `<span class="err">the balance could not be read from the node: ${esc(st.scanError)}</span>`;
+  return st.scannedAt ? "scanned " + new Date(st.scannedAt).toLocaleTimeString() : "not scanned yet";
+}
+
 function homeScreen() {
   const mine = st.mine || [];
   const open = pools.filter((t) => !mine.some((m) => m.id === t.id && !["ABORTED", "REJECTED", "CONFIRMED", "BROADCAST"].includes(m.phase)));
   let h = "";
   if (msg) h += `<div class="panel warn">${esc(msg)} <button class="ghost" id="msgok">ok</button></div>`;
   h += `<div class="panel"><div class="label">Wallet</div><div class="big">${sats(st.balance || 0)} <span style="font-size:18px">sats</span></div>
-    <p class="faint">height ${st.height} · ${st.scannedAt ? "scanned " + new Date(st.scannedAt).toLocaleTimeString() : "scanning the UTXO set… (can take a minute)"} · relay ${esc(st.relay)}</p>
-    <div class="row"><button class="soft" id="scan">SCAN AGAIN</button><button class="soft" id="recv">RECEIVE bc1q</button>${st.taproot ? `<button class="soft" id="recvtr">RECEIVE bc1p</button>` : ""}<button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh ${kind(received.type)} address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
+    <p class="faint">height ${st.height} · ${scanLine()} · relay ${esc(st.relay)}</p>
+    <div class="row"><button class="soft" id="scan"${st.scanning ? " disabled" : ""}>${st.scanning ? "scanning…" : "SCAN AGAIN"}</button><button class="soft" id="recv">RECEIVE bc1q</button>${st.taproot ? `<button class="soft" id="recvtr">RECEIVE bc1p</button>` : ""}<button class="soft" id="send">SEND</button></div>${received ? `<p><code id="addrtext">${esc(received.address)}</code><br><span class="faint">fresh ${kind(received.type)} address #${received.index}, used only once</span></p><div class="row"><button id="copy">${copied ? "COPIED ✓" : "COPY"}</button><button class="ghost" id="hideaddr">hide</button></div>` : ""}</div>`;
   if (sending) h += sendPanel();
   else if (joining) {
     const j = joining, pay = j.pay, P = plan();

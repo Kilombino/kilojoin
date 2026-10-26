@@ -32,6 +32,8 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
     private fun wallets(): List<Wallet> = listOfNotNull(wallet, walletTr)
     private fun walletFor(t: ScriptType): Wallet =
         (if (t == ScriptType.P2TR) walletTr else wallet) ?: error("unlock Kilojoin once so it can work out its Taproot account")
+    /** Scan every account off the caller's thread; the progress and any error show in the status. */
+    private fun scanSoon(delayMs: Long = 0) { Thread { runCatching { Thread.sleep(delayMs); Wallet.scanAll(rpc, wallets()) } }.start() }
     private fun allCoins(): List<Wallet.Coin> = wallets().flatMap { it.coins }.sortedByDescending { it.value }
     private fun scriptOf(c: Wallet.Coin): String = walletFor(c.type).script(c.branch, c.index).toHex()
 
@@ -40,7 +42,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         if (wallet == null) { val x = Wallet.xpubFor(sec); engine.setSetting("xpub", x); wallet = Wallet(dir, rpc, x) }
         if (walletTr == null) {
             val x = Wallet.taprootXpubFor(sec); engine.setSetting("xpub_tr", x)
-            walletTr = Wallet(dir, rpc, x, taproot = true).also { w -> Thread { runCatching { w.scan() } }.start() }
+            walletTr = Wallet(dir, rpc, x, taproot = true); scanSoon()
         }
     }
     @Volatile private var pools: List<Protocol.Terms> = emptyList()
@@ -59,10 +61,10 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
 
     fun start() {
         server.start()
-        Thread { wallets().forEach { runCatching { it.scan() } } }.start()
-        // Keep the balance current without a click: every 10 minutes (the UTXO scan is cheap).
+        scanSoon()
+        // Keep the balance current without a click: every 10 minutes after the last scan ended.
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(
-            { wallets().forEach { runCatching { it.scan() } } }, 10, 10, java.util.concurrent.TimeUnit.MINUTES)
+            { runCatching { Wallet.scanAll(rpc, wallets()) } }, 10, 10, java.util.concurrent.TimeUnit.MINUTES)
     }
     val events get() = engine.events
     fun onEvent(f: (Engine.Event) -> Unit) { engine.onEvent = f }
@@ -119,7 +121,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         when (p) {
             "/api/status" -> reply(ex, 200, status())
             "/api/lock" -> { secret = null; token = null; reply(ex, 200, ok()) }
-            "/api/scan" -> { wallets().forEach { it.scan() }; reply(ex, 200, status()) }
+            "/api/scan" -> { scanSoon(); Thread.sleep(300); reply(ex, 200, status()) }
             "/api/receive" -> {
                 val rw = walletFor(if (ex.requestURI.query?.contains("type=p2tr") == true) ScriptType.P2TR else ScriptType.P2WPKH)
                 val (i, a) = rw.receive()
@@ -210,7 +212,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                     engine.expectExact(Engine.AfterExact(txid, vout, d.amount, t, i, node, after.optString("pool").ifEmpty { null },
                         after.optString("poolPassword").ifEmpty { null }, after.optJSONObject("create")))
                 } }
-                Thread { runCatching { Thread.sleep(3000); w.scan() } }.start()
+                scanSoon(3000)
                 reply(ex, 200, JSONObject().put("txid", txid))
             }
             "/api/close" -> { engine.session(b.getString("pool"))!!.requestClose(); reply(ex, 200, ok()) }
@@ -288,7 +290,6 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         val sec = Vault.Secret(words, passphrase)
         secret = sec; wallet = null; walletTr = null
         openWallets(sec)
-        Thread { runCatching { wallet?.scan() } }.start()
         withCookie(ex, newSession())
         // The new words are shown ONCE, to be written down; imported ones are not echoed back.
         reply(ex, 200, JSONObject().put("ok", true).apply { if (b.optString("mode") != "import") put("words", words.joinToString(" ")) })
@@ -338,6 +339,8 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         if (ws.isNotEmpty()) {
             val mixed = engine.mixedScripts()
             o.put("balance", ws.sumOf { w -> w.coins.sumOf { it.value } }).put("scannedAt", ws.minOf { it.scannedAt })
+                .put("scanning", Wallet.scanning).put("scanProgress", Wallet.scanProgress ?: JSONObject.NULL)
+                .put("scanError", Wallet.scanError ?: JSONObject.NULL)
             o.put("taproot", walletTr != null)
             o.put("coins", JSONArray(allCoins().map { c ->
                 val w = walletFor(c.type)

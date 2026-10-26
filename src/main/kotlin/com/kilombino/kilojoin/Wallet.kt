@@ -13,7 +13,7 @@ import java.io.File
 /**
  * One account of the seed seen through the node: native SegWit (BIP-84, m/84'/0'/0') or, with
  * [taproot], Taproot (BIP-86, m/86'/0'/0'). Its coins come from `scantxoutset` over the
- * account's two branches, so the node needs no wallet of its own. Fresh addresses are handed
+ * account's two branches (see [scanAll]), so the node needs no wallet of its own. Fresh addresses are handed
  * out from a persisted counter, never reused.
  */
 class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String, val taproot: Boolean = false) {
@@ -61,13 +61,15 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String, val 
     @Synchronized
     fun receive(): Pair<Int, String> { val (i, _) = fresh(0); return i to address(0, i) }
 
-    /** Scan the UTXO set for this wallet's coins (both branches, used top + gap). Blocking: can take a minute. */
+    /** Both branches to look at: what is used or handed out, plus [gap]. */
+    private fun ranges(gap: Int) = mapOf(0 to top(0) + gap, 1 to top(1) + gap)
+    private fun descriptors(range: Map<Int, Int>) = range.map { (b, n) ->
+        JSONObject().put("desc", "${if (taproot) "tr" else "wpkh"}($descKey/$b/*)").put("range", n)
+    }
+
+    /** This account's coins out of a scan's result. */
     @Synchronized
-    fun scan(gap: Int = 50) {
-        val desc = JSONArray()
-        val range = mapOf(0 to top(0) + gap, 1 to top(1) + gap)
-        for ((b, n) in range) desc.put(JSONObject().put("desc", "${if (taproot) "tr" else "wpkh"}($descKey/$b/*)").put("range", n))
-        val r = rpc.call("scantxoutset", "start", desc, timeoutMs = 600_000) as JSONObject
+    private fun take(r: JSONObject, range: Map<Int, Int>) {
         val byScript = HashMap<String, Pair<Int, Int>>()
         for ((b, n) in range) for (i in 0..n) byScript[script(b, i).toHex()] = b to i
         val found = ArrayList<Coin>()
@@ -87,6 +89,70 @@ class Wallet(private val dir: File, private val rpc: Rpc, val xpub: String, val 
     fun confirmations(c: Coin): Int = if (c.height <= 0 || tip <= 0) 0 else tip - c.height + 1
 
     companion object {
+        /**
+         * The node runs one `scantxoutset` at a time, and each one walks the whole UTXO set: a
+         * minute on a fast disk, much longer on a small machine. So there is one scan at a time
+         * here too, for every account at once, with no short timeout; its progress and any error
+         * are kept for the screen and written to the log.
+         */
+        private val scanLock = Any()
+        @Volatile private var lastScanStart = 0L
+        @Volatile var scanning = false; private set
+        /** 0–100 while the node is walking the UTXO set, null when it hasn't said. */
+        @Volatile var scanProgress: Double? = null; private set
+        @Volatile var scanError: String? = null; private set
+        private const val SCAN_TIMEOUT_MS = 4 * 3600 * 1000
+
+        fun scanAll(rpc: Rpc, wallets: List<Wallet>, gap: Int = 50) {
+            if (wallets.isEmpty()) return
+            val asked = System.currentTimeMillis()
+            synchronized(scanLock) {
+                // A scan that began after this was asked has just finished: nothing new to see.
+                if (lastScanStart >= asked) return
+                var start = System.currentTimeMillis()
+                scanning = true; scanProgress = null
+                val poll = Thread {
+                    while (true) {
+                        runCatching { (rpc.call("scantxoutset", "status", timeoutMs = 15_000) as? JSONObject)?.let { scanProgress = it.optDouble("progress") } }
+                        try { Thread.sleep(3000) } catch (_: InterruptedException) { break }
+                    }
+                }.apply { isDaemon = true; start() }
+                try {
+                    waitForNodeScan(rpc)
+                    val parts = wallets.map { it to it.ranges(gap) }
+                    val desc = JSONArray().also { a -> parts.forEach { (w, r) -> w.descriptors(r).forEach { a.put(it) } } }
+                    println("scan: the node is walking its UTXO set for ${wallets.size} account(s)")
+                    start = System.currentTimeMillis()
+                    val r = try { rpc.call("scantxoutset", "start", desc, timeoutMs = SCAN_TIMEOUT_MS) }
+                        catch (e: Rpc.RpcError) {
+                            // Another scan got to the node first (one left running by an earlier start): wait for it, then ours.
+                            if (e.message?.contains("in progress") != true) throw e
+                            waitForNodeScan(rpc); start = System.currentTimeMillis(); rpc.call("scantxoutset", "start", desc, timeoutMs = SCAN_TIMEOUT_MS)
+                        } as JSONObject
+                    parts.forEach { (w, rg) -> w.take(r, rg) }
+                    scanError = null
+                    println("scan: done in ${(System.currentTimeMillis() - start) / 1000} s, ${wallets.sumOf { it.coins.size }} coin(s)")
+                } catch (e: Exception) {
+                    scanError = e.message ?: e.toString()
+                    println("scan failed: $scanError")
+                    throw e
+                } finally {
+                    poll.interrupt(); scanning = false; scanProgress = null; lastScanStart = start
+                }
+            }
+        }
+
+        /** Wait while the node is busy with a scan it already had running. */
+        private fun waitForNodeScan(rpc: Rpc) {
+            var said = false
+            val until = System.currentTimeMillis() + SCAN_TIMEOUT_MS
+            while (System.currentTimeMillis() < until) {
+                val st = runCatching { rpc.call("scantxoutset", "status", timeoutMs = 15_000) }.getOrNull() as? JSONObject ?: return
+                if (!said) { println("scan: waiting for a scan the node already has running (${st.optDouble("progress")} %)"); said = true }
+                Thread.sleep(3000)
+            }
+        }
+
         fun master(secret: Vault.Secret) = Bip32Priv.fromSeed(Bip39.toSeed(secret.words, secret.passphrase))
 
         /** The BIP-84 account key as a plain "xpub", the prefix the node's descriptors accept. */

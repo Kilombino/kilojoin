@@ -11,6 +11,7 @@ a { color:var(--purple); }
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin:14px 0; }
 .label { color:var(--purple); font-size:12px; letter-spacing:.12em; text-transform:uppercase; margin-bottom:8px; }
 .muted { color:var(--muted); } .faint { color:var(--faint); font-size:13px; }
+.err { color:var(--bad); }
 .good { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
 .big { font-size:34px; color:var(--purple); font-weight:bold; }
 button { background:var(--purple); color:var(--ink); border:0; border-radius:12px; padding:10px 16px; font:inherit; font-weight:bold; cursor:pointer; }
