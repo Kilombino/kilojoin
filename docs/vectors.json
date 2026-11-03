@@ -1,4 +1,44 @@
 {
+  "v6": {
+    "terms_line": "kilojoin/v6/terms|6|blake2b|fedcba9876543210|489a926955893dc08c27b6452f366605f92e9c0801faf49aa4a280e77579bd19|10000|2000|2|5|false|1791400000|p2wpkh|1|74527243860a52404d6f30c0ed9834ba2cebeeede0e3fd2f497abf3198ca5ec4|c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5:010001|1||3600|1800|7200|1791418000",
+    "mac_sync": {
+      "at": 1791395000,
+      "mac": "c337402f79157613f5e35bda35b3c539926529d8a986ec6fbba1900ff12bd509"
+    },
+    "terms_hash": "e320a1402a035530874e45452bd2209849f08ff68a38c5c72ae9d72832dd9f66",
+    "mac_vote_unchanged": {
+      "vote_id": "0102030405060708",
+      "mac": "2d57740af03d8df43f9084cfd5cb0573ab1ec257861274fd257d5de4ad6fc851",
+      "accept": true
+    },
+    "announcement": {
+      "app": "kilowallet",
+      "public_key": "489a926955893dc08c27b6452f366605f92e9c0801faf49aa4a280e77579bd19",
+      "outputs": 1,
+      "max_peers": 5,
+      "private": false,
+      "creator": "74527243860a52404d6f30c0ed9834ba2cebeeede0e3fd2f497abf3198ca5ec4",
+      "min_peers": 2,
+      "payments": [],
+      "peers": 1,
+      "timeout": 1791400000,
+      "script": "p2wpkh",
+      "network": "blake2b",
+      "denomination": 10000,
+      "fee_rate": 2,
+      "async": {
+        "outputs": 1800,
+        "sign": 7200,
+        "final": 1791418000,
+        "vote": 3600
+      },
+      "v": 6,
+      "blind_key": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5:010001",
+      "id": "fedcba9876543210",
+      "state": "open",
+      "max_inputs": 1
+    }
+  },
   "channel_event": {
     "conversation_key": "e8d3ab540be7d9ff1575a5c8850c2956740667ac1c1cdffda2cf07761f28a773",
     "plaintext": "{\"type\":\"output\",\"script\":\"001499056d28366a27b236075ab81c2d3a534497eb13\"}",
