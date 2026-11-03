@@ -103,10 +103,17 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
 
     // ------------------------------------------------------------------ persistence
 
+    /**
+     * Every round to disk, and on the disk before this returns: a session saves before it acknowledges
+     * anything (Kilojoin v6: a vote, an output), so what it said it recorded survives a crash or power cut.
+     */
     @Synchronized
     private fun persist() {
         val a = JSONArray(); sessions.values.forEach { a.put(it.state.toJson()) }
-        val tmp = File(dir, "sessions.json.tmp"); tmp.writeText(a.toString()); tmp.renameTo(sessionsFile)
+        val tmp = File(dir, "sessions.json.tmp")
+        java.io.FileOutputStream(tmp).use { o -> o.write(a.toString().toByteArray()); o.fd.sync() }
+        java.nio.file.Files.move(tmp.toPath(), sessionsFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE)
     }
 
     fun load() {
@@ -126,6 +133,10 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun states(): List<PoolSession.State> = sessions.values.map { it.state }.sortedByDescending { it.created }
     fun session(id: String): PoolSession? = sessions[id]
     fun remove(id: String) { sessions.remove(id)?.stop(); roundKeys.remove(id); persist() }
+    /**
+     * Coins in a live round. A round we signed stays live (Kilojoin v6) past its deadlines until its
+     * transaction confirms or one of its coins is spent elsewhere: its coins stay here.
+     */
     fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done && it.state.phase != PoolSession.Phase.BROADCAST }
         .flatMap { s -> s.state.seat.coins.map { it.outpoint } }.toSet()
 
@@ -166,10 +177,12 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
      */
     fun create(secret: Vault.Secret, w: Wallet, cs: List<Wallet.Coin>, amount: Long, feeRate: Double, minPeers: Int, maxPeers: Int,
                hours: Int, password: String?, maxInputs: Int = 1, outputs: Int = 1,
-               payTo: List<ByteArray>? = null, payments: List<Long> = emptyList()): PoolSession.State {
-        // Kilojoin v3 (blind outputs), like the app since 1.1.5; v4 with several outputs each (1.2.0); v5 payments (1.2.7).
+               payTo: List<ByteArray>? = null, payments: List<Long> = emptyList(),
+               /** Kilojoin v6: asynchronous rounds, for people who answer hours apart (this node, always on, runs it). */
+               async: Boolean = false): PoolSession.State {
+        // Kilojoin v3 (blind outputs), like the app since 1.1.5; v4 with several outputs each (1.2.0); v5 payments (1.2.7); v6 async.
         val np = PoolSession.newPool(amount, feeRate, maxPeers, hours, minPeers, !password.isNullOrEmpty(),
-            w.type, maxInputs, v3 = true, outputs = outputs, payments = payments)
+            w.type, maxInputs, v3 = true, outputs = outputs, payments = payments, async = async)
         // A payment's outputs are the recipients': no address of ours is handed out for them.
         val p = pick(secret, w, cs, if (payTo != null) 0 else outputs).let { p ->
             if (payTo == null) p else {
@@ -227,7 +240,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 val p = pickNodes(w, listOf(coin), listOf(a.node), outputs)
                 if (c != null) {
                     val np = PoolSession.newPool(c.getLong("amount"), c.getDouble("feeRate"), c.getInt("maxPeers"), c.getInt("hours"),
-                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1), v3 = true, outputs = outputs)
+                        c.getInt("minPeers"), c.optString("password").isNotEmpty(), w.type, c.optInt("maxInputs", 1), v3 = true, outputs = outputs,
+                        async = c.optBoolean("async"))
                     add(PoolSession.newState(np.terms, true, np.secret, p.coins, p.keys, p.paths, p.mixes, p.change, c.optString("password").ifEmpty { null },
                         np.creatorSecret, np.blindPriv), p.keys).state
                 } else {
@@ -277,7 +291,8 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
                 pools.maxOfOrNull { it.createdAt }?.let { setSetting("last_pool_seen", it) }
                 pools.take(3).forEach { t -> emit("New coinjoin pool",
                     "${if (t.outputs > 1) "${t.outputs} × " else ""}${sats(t.amount)} sats${if (t.script == com.kilombino.pyblockwatch.crypto.ScriptType.P2TR) " · Taproot" else ""} · " +
-                        (if (t.v5) "a payment pool · " else "") + "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
+                        (if (t.v5) "a payment pool · " else "") + (if (t.v6) "asynchronous · " else "") +
+                        "${t.peers}/${t.maxPeers} people · ${t.feeRate} sat/vB", t.id) }
             }
         }, 20, 300, TimeUnit.SECONDS)
         Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay({ runCatching { checkExact() } }, 30, 30, TimeUnit.SECONDS)

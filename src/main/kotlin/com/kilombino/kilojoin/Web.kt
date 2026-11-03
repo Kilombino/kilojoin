@@ -174,7 +174,8 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
                     "these coins are too small for this pool"
                 }
                 val st = engine.create(s!!, pw, cs, amount, rate, b.optInt("minPeers", 2),
-                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), maxInputs, outputs, check?.scripts, payments)
+                    b.optInt("maxPeers", 5), b.optInt("hours", 6), b.optString("password"), maxInputs, outputs, check?.scripts, payments,
+                    async = b.optBoolean("async"))
                 reply(ex, 200, JSONObject().put("pool", st.poolId).put("amount", amount).put("outputs", outputs))
             }
             // Whether SEND's recipients can be paid through a pool, and how (Kilowallet's rule).
@@ -324,6 +325,7 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
         .put("script", Protocol.scriptName(t.script)).put("maxInputs", t.maxInputs).put("version", t.version).put("outputs", t.outputs)
         .put("inputFee", kotlin.math.ceil(t.feeRate * CoinjoinTx.inputVb(t.script)).toLong())
         .put("v5", t.v5).put("payments", JSONArray(t.payments)).put("mixTotal", t.mixTotal)
+        .put("v6", t.v6).also { o -> t.async?.let { o.put("async", it.toJson()) } }
 
     private fun status(): JSONObject {
         val ws = wallets()
@@ -368,6 +370,11 @@ class Web(private val dir: File, private val rpc: Rpc, port: Int) {
             .put("signed", st.postedSig).put("sigs", st.sigs.size).put("txid", st.txid ?: "")
             .put("planFee", plan?.fee ?: 0).put("planPeople", st.round.size).put("planCoins", plan?.coins?.size ?: 0)
             .put("v5", st.terms.v5).put("payments", JSONArray(st.terms.payments)).put("mixTotal", st.terms.mixTotal)
+            // Kilojoin v6: the windows, whether the creator recorded our yes, our outputs acknowledged, and coins held after signing.
+            .put("v6", st.terms.v6).also { o -> st.terms.async?.let { o.put("async", it.toJson()) } }
+            .put("voteRecorded", st.voteAcked != null && st.voteAcked == st.voteId)
+            .put("outputsAcked", st.handedIn.size).put("final", st.terms.async?.final ?: 0)
+            .put("reserved", engine.session(st.poolId)?.reserved == true)
             // A payment through the pool: what it pays and to whom (only on this node, never announced).
             .put("pay", engine.isPay(st.poolId))
             .put("recipients", if (!engine.isPay(st.poolId)) JSONArray() else JSONArray(st.mixScripts.mapIndexed { i, sp ->
