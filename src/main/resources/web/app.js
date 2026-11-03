@@ -448,7 +448,8 @@ function bind() {
       if (joining.create) await api("/api/create", { coins: chosen, script: joining.script, maxInputs: joining.maxInputs, outputs: joining.outputs, amount: plan().amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
         maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value,
         fromCoins: !!joining.fromCoins && !joining.pay, pay: joining.pay ? joining.pay.recipients : undefined, paymentPool: !!(joining.pay && joining.pay.v5) });
-      if (joining.pay) payDraft = null;
+      // Opening a pool ends here: its creator is already in it. Only a pool from the list is joined.
+      if (joining.create) { if (joining.pay) payDraft = null; }
       else await api("/api/join", { pool: joining.id, coins: chosen, password: $("#c-pw") ? $("#c-pw").value : "" });
       joining = null; chosen = []; await load();
     } catch (e) { msg = e.message; homeScreen(); }

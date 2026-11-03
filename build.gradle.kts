@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.kilombino.kilojoin"
-version = "0.9.2"
+version = "0.9.3"
 
 kotlin {
     jvmToolchain(17)
