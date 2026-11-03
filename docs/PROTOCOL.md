@@ -1,8 +1,8 @@
-# Kilojoin v1, v2, v3, v4 and v5 — protocol
+# Kilojoin v1, v2, v3, v4, v5 and v6 — protocol
 
 Kilojoin is coinjoin for the BLAKE2b chain (BIP-110 + BLAKE2b proof of work). Nobody coordinates it and nobody holds funds: pools are announced on a Nostr relay, and the people in a pool talk through NIP-44 encrypted Nostr events. Each wallet builds the same transaction, checks its own output and change, and signs only its own input. The design follows Joinstr, adapted to how Kilowallet starts a round: people join an open pool, and once enough are in, anyone can ask to close it and the rest vote.
 
-This document describes v1 exactly as implemented in (and what v2 changes in section 10, v3 in section 11, v4 in section 12 and v5 in section 13):
+This document describes v1 exactly as implemented in (and what v2 changes in section 10, v3 in section 11, v4 in section 12, v5 in section 13 and v6 in section 14):
 
 - Kilowallet (Android): `app/src/main/java/com/kilombino/pyblockwatch/coinjoin/`
   - `Protocol.kt`: constants, messages, hashes
@@ -527,3 +527,176 @@ Tested end to end on a BLAKE2b regtest node over relay.kilombino.com:
 - The app's protocol code opening a payment pool (30 000 + 15 000, one output of 45 000 each), Kilowallet for StartOS and Kilojoin joining. Mined.
 - Kilojoin opening a payment pool to three recipients (11 000 + 2 500 + 16 500, 3 × 10 000), the app's protocol code joining. Mined.
 - A 2 × 5 000 pool (Kilowallet for StartOS and Kilojoin) mined; a 3 × 3 000 pool was listed by neither, and both refuse to open one.
+
+---
+
+## 14. Kilojoin v6: asynchronous rounds (unreleased; branch `kilojoin-v6` of Kilowallet and Kilojoin)
+
+v6 is for people who answer minutes or hours apart, mostly on phones. Each one can do their part of a stage, lock the phone and come back only when the wallet has to act again. The first to sign never has to come back: whoever holds every signature broadcasts.
+
+Everything not listed here is as in v5 (and v3/v4): blind outputs, the creator's own key, MACs, every member checks every seat, several coins and several outputs each, Taproot pools, payment pools. A v6 pool may also pay nobody (`payments` empty): it is then a plain mix of `outputs` each, as in v3 or v4.
+
+Proposed by Roman Modin (RedWallet) in [Kilombino/kilojoin#1](https://github.com/Kilombino/kilojoin/issues/1).
+
+### Why a new version and not a capability
+
+A wallet that only knows v5 would join an asynchronous pool and run it with its own short windows (10 minutes to vote, 20 to sign), and break the round for everyone. With a new version older wallets simply don't list these pools, as with v3, v4 and v5.
+
+### Pool announcement
+
+`"v": 6`, with every v4 field (`creator`, `blind_key`, `script`, `max_inputs`, `outputs` from 1 to 5), `payments` (an empty array, or 1 to 5 amounts as in v5), and one more:
+
+```json
+"async": {"vote": 3600, "outputs": 1800, "sign": 7200, "final": 1791418000}
+```
+
+| field | meaning | bounds |
+|---|---|---|
+| `vote` | seconds each vote stays open | 600 – 3 600 |
+| `outputs` | seconds to hand in the blind outputs after a round closes | 300 – 1 800 |
+| `sign` | seconds to sign once the transaction is known | 1 200 – 7 200 |
+| `final` | unix time no stage of the pool goes past | `timeout` < `final` ≤ `timeout` + 86 400 |
+
+- The lower bounds are v5's fixed windows: a v6 pool is never shorter than v5.
+- `timeout` keeps its meaning: until then the pool is open (people join, anyone may ask to close). A vote under way at `timeout` runs to its own deadline; a new vote that replaces one (below) may start until `final`.
+- No deadline is ever later than `final`. A missing participant can't extend it.
+- Kilojoin and Kilowallet open asynchronous pools with the longest windows and `final` = `timeout` + 2 × `vote` + 2 × `outputs` + `sign` (room for one vote that times out, a second vote, and a full round).
+- A wallet lists a v6 pool only if every field is in range, as for v5 (and `payments`, when not empty, as in v5).
+- A wallet that knows only v1–v5 does not list v6 pools (it accepts `v` 1 to 5 only).
+
+### What a join binds
+
+The joiner sends `"terms"` in its `join`: the SHA-256, in hex, of this line (UTF-8), the pool's fixed terms joined with `|`:
+
+```
+kilojoin/v6/terms|<v>|<network>|<id>|<public_key>|<denomination>|<fee_rate × 1000, rounded>|<min_peers>|<max_peers>|<private>|<timeout>|<script>|<max_inputs>|<creator>|<blind_key>|<outputs>|<payments joined with ",">|<vote>|<outputs window>|<sign>|<final>
+```
+
+Booleans are `true`/`false`. `state` and `peers` change while the pool lives and are not in it.
+
+- The creator refuses a join whose `terms` is not its own (`"the pool's terms are not the ones you joined for"`).
+- `welcome` carries `"terms"` too, and the joiner refuses a welcome that names other terms.
+- From then on each member runs the pool with the terms it joined under. Every member holds the pool key, so a later announcement could be anyone's: only the bound copy counts.
+
+### Who runs it
+
+The creator signs the blinded outputs and lists them, so it has to be there at every stage. An asynchronous pool is meant to be opened by an always-on Kilojoin node. A phone may open one, but must stay online until the round is done.
+
+The creator **keeps its round on disk before it acknowledges anything**: a vote, an output. Kilojoin writes `sessions.json` with an fsync and an atomic rename on every change; Kilowallet commits its preferences synchronously while it runs a v6 pool as creator. After a restart it loads the round, reconnects and replays the channel, where every step is idempotent.
+
+Members keep their state too (Kilowallet and Kilojoin always have). After a restart a member reconnects, replays, and asks for a snapshot.
+
+### Messages
+
+New messages, and new fields of existing ones. All are on the pool channel unless said otherwise; creator messages come from the creator's key, as in v3.
+
+| type | from | payload | notes |
+|---|---|---|---|
+| `vote_open` | creator | `by`, `vote_id`, **`n`**, **`seq`**, **`deadline`** | `n`: the vote's number (1, 2, …) in this pool; `seq`: the roster it is over; `deadline` ≤ `final`. |
+| `vote` | member | as in v3 (`token_hash`, `vote_id`, `accept`, `mac`) | unchanged. |
+| `vote_ack` | creator | `vote_id`, `token_hash`, `accept`, `status`, `n`, `yes`, `seats` | `status`: `recorded`, `superseded` (not the vote under way), `closed` (that vote already became a round) or `not_in_roster`. `yes` and `seats`: counts. |
+| `reopen` | creator | `vote_id`, **`n`**, **`outcome`**, **`round_id`** (when it calls a round off) | `outcome`: `declined`, `withdrawn`, `roster_changed`, `timeout` or `outputs_timeout`. |
+| `closing` | creator | as in v3, plus **`vote_id`**, **`n`**, **`seq`** | the round of that vote, over that roster. |
+| `output_ack` | creator → the output's fresh key (direct) | `round_id`, `script` | NIP-44 under (creator, fresh key). |
+| `sync` | member | `token_hash`, `at` (unix), `mac` = mac(token, `"sync"`, `at`) | asks for a snapshot; the creator answers only a valid MAC with `at` within 10 minutes of its clock. |
+| `state` | creator | see *Snapshot* | |
+
+`sig`, `tx`, `leave`, `blind`, `blind_sig`, `outputs` and `roster` are as in v5.
+
+### Order and repeats
+
+The relay may deliver events twice, late, or in any order, and a reconnecting wallet replays the whole channel. So:
+
+- **Votes are numbered.** A wallet applies a `vote_open` only if its `n` is higher than every vote it has applied or seen end. A `reopen` ends vote `n` for good (a later replay of that `vote_open` is ignored). A `closing` counts only for the vote under way (`n`, `vote_id`).
+- **A vote is over one roster.** A `vote_open` whose `seq` is newer than the member's roster waits until that roster arrives; one whose roster is older than the member's is stale.
+- **One answer per seat and vote.** The creator counts a seat's yes once; a repeat is acknowledged again (`recorded`) and adds nothing. A `vote` for any other vote is answered `superseded` (or `closed`) and not counted; replays of those older than 10 minutes are not answered at all.
+- **A request is used once.** The creator never opens a vote twice from the same `close_request` `vote_id` (it keeps the ids it used).
+- **An output counts once.** The creator keeps each valid blind output by its script; a repeat is acknowledged again.
+- **A member sends again what wasn't acknowledged:** its vote every 30 s until a `vote_ack` (or a snapshot) says `recorded`; each output until its `output_ack`; each signature until the relay answers OK, and again if a snapshot lacks it. Each repeat is the same message, so it can't count twice.
+
+### The round
+
+```
+OPEN ── close request ─► VOTE n over roster seq (window `vote`, ≤ final)
+   every seat yes ─► closing at once (no waiting for the deadline)
+   a no ─────────► that seat leaves (acknowledged); reopen "declined": the pool is open again
+   a leave, a spent coin ─► new roster; reopen "withdrawn" / "roster_changed"
+   deadline ─────► silent seats leave the roster; reopen "timeout";
+                   if the creator said yes and ≥ min_peers remain: VOTE n+1 over the new roster
+CLOSING (window `outputs`, ≤ final): blind outputs, each acknowledged
+   all in ─► outputs ─► SIGNING
+   deadline: seats that never asked for blind signatures leave the roster; reopen "outputs_timeout"
+             (with round_id) and VOTE n+1 over the rest; if every seat asked, abort (as v3)
+SIGNING (window `sign`, ≤ final): sign, send, anyone with every signature broadcasts, posts tx
+   deadline / final: a wallet that never signed is out (its coins never moved);
+                     a wallet that signed stays, its coins RESERVED (below)
+```
+
+1. **Never a smaller round without asking.** v5 closes a timed-out vote with the yes-voters only, and closes a round again without seats that went silent. v6 does neither: the round is always the whole roster the vote was over, every seat of it having said yes to that very vote. A roster change ends the vote; a new vote over the new roster asks everyone again (an earlier yes does not carry over). The creator opens such a new vote by itself only after a timeout, only if it said yes itself, at most 5 times in a pool, and not when the outputs window would no longer fit before `final`.
+2. **Decline, withdraw, timeout are explicit**, in `reopen`'s `outcome`, and every member applies them the same way.
+3. **Missing history never authorizes signing.** A member takes a `closing` only for the vote under way, over exactly the roster it holds for that vote's `seq`, and only if *it* answered yes to that `vote_id` (its own record, kept on its disk). A wallet that lost its history, or is shown a round it never agreed to, does not take part. Signing still needs the creator's `outputs` and the checks of v5.
+4. **Blind signatures are given once per seat for the pool's life.** A round called off and voted again reuses them (the member hands the same outputs in again); a seat never gets a second set.
+5. **Anyone broadcasts.** Every wallet that holds every signature assembles and broadcasts the same transaction (a node answers "already" to the second one), and posts `tx`. The first signer never has to come back.
+
+### Reserved inputs after signing
+
+Once a wallet has signed all its inputs, **no deadline, no `final`, no `abort` frees its coins**: another member may hold every signature and broadcast later. The round stays in signing, reserved, until it resolves on the chain:
+
+- the planned txid shows up (mempool or block): the round went out, as if it had broadcast it itself; or
+- a coin of the round is spent by any other transaction: it can never confirm, and the coins are free.
+
+The wallet looks every couple of minutes. A signature may still arrive meanwhile; whoever then holds them all broadcasts. To free its coins earlier, a member spends one of them (that cancels the round for everyone, as it should). After broadcasting, v6 gives up a transaction only when one of its coins is spent elsewhere (no 12-hour limit); while it is not seen and its coins are unspent, a wallet with every signature broadcasts it again.
+
+### Snapshot (`state`)
+
+The creator publishes a snapshot after every stage change, every vote it records, every new signature, and on a `sync` (at most one every 10 seconds unless a stage changed):
+
+```json
+{"type":"state","n":17,"at":1791395000,"phase":"voting","final":1791418000,"roster_seq":4,"reason":"",
+ "vote":{"vote_id":"…","n":2,"seq":4,"deadline":1791398600,"seats":3,"accepted":["<token hash>","…"]},
+ "round":{"round_id":"…","deadline":…,"seats":3,"blind_given":2,"outputs_in":1,"outputs_wanted":2},
+ "sign":{"deadline":…,"sigs":{"<outpoint>":"<sig>",…}},
+ "txid":"…",
+ "replay":[{"at":…,"msg":{"type":"roster",…}},{"at":…,"msg":{"type":"vote_open",…}},{"at":…,"msg":{"type":"closing",…}},…]}
+```
+
+- `vote`, `round` and `sign` are present in their stages only.
+- `replay` holds the newest `roster`, `vote_open`, `closing`, `outputs`, `reopen` and `abort` the creator sent, as it sent them.
+- A member applies a snapshot only if its `n` is newer than the last one it applied, and **only through the usual handlers**: each `replay` message, each signature (verified against the plan) and the txid are handled exactly as if they had come on the channel. A snapshot never moves a wallet by itself, so it can't make one sign anything it would not sign otherwise.
+- During the outputs stage it shows counts only (`blind_given`, `outputs_in`): never which seat handed in what.
+
+### Privacy
+
+As in v5, plus:
+
+- `output_ack` goes to the output's own fresh key, over that output's own connection: it points at no seat. A wallet keeps that connection open until the acknowledgment (20 s), then tries again later from a new fresh key.
+- Snapshots carry counts for the outputs, and otherwise what the channel already shows (rosters, votes by token hash, signatures).
+- A round called off is retried only without seats that never asked for blind signatures, which handed in nothing: the creator learns nothing new about the outputs from it.
+- Longer windows let outputs come in further apart, which helps against timing; Tor (a circuit per output) still matters.
+- Notifications are not part of the protocol. A wallet that wakes on a push should treat it as a hint and check the creator's signed state (a `sync`) before acting; it should not hand its addresses or votes to a push service.
+
+### Limits
+
+- **Relay retention:** a pool's channel must stay on the relay until its last round resolves (at least `final` plus a day). The snapshot keeps a returning wallet going even if older events are gone, but a member that never got its own blind signatures can't hand its outputs in from a snapshot alone.
+- **History:** wallets subscribe without `limit`. A relay that caps a REQ (relay.kilombino.com: 500 events) may cut a long pool's history; the snapshot covers what a wallet needs to go on.
+- **Events:** a vote costs a `vote` and a `vote_ack` per seat (more with repeats), plus snapshots: well within relay.kilombino.com's 20 000 kind-2023 events per pubkey a day.
+- **Time:** wallets compare deadlines with their own clock; a phone far off may act late or early by that much.
+
+### Test vectors
+
+`v6` in [`vectors.json`](vectors.json): an announcement, its terms line and terms hash, and a `sync` MAC (and v3's vote MAC, which v6 keeps).
+
+### Tested
+
+Three wallets in one process (an always-on creator and two members) on a relay in that same process (`TestRelay`, `ws://127.0.0.1`, never relay.kilombino.com), with a clock moved forward so hours run in seconds: `AsyncRoundsE2ETest` in Kilowallet (`app/src/test/.../coinjoin/`), which Kilojoin runs too. Each case with a chain in memory and, with `KILOJOIN_REGTEST=1`, a BLAKE2b regtest node that checks every signature and mines the round:
+
+- three approve 10 and 35 minutes apart; the first signer goes offline once the relay took its signature; the others sign 40 and 70 minutes later; the last one broadcasts the same transaction everyone planned; the first comes back and finds it confirmed;
+- lost acknowledgments: a lost `vote_ack` (and lost snapshots), a lost output, a lost OK for a signature: each sent again and counted once;
+- every event delivered twice and replays shuffled, a duplicate vote injected, a member restarted mid-vote;
+- a vote that expires with a silent member: a new vote over the new roster, no round until the others answer again; the silent one comes back out of the pool;
+- the signing window and `final` pass with one signature missing: the signers stay reserved; then a coin is spent elsewhere and they are free; and a lost signature sent again hours later still completes a reserved round;
+- a roster change during a vote (a member leaves): the vote ends, no round of the rest, a late yes is `superseded`;
+- the creator restarted from disk during the vote (a yes arriving while it was down), during the outputs and during signing;
+- a forged `closing` (and a snapshot carrying it) for a member that never said yes: ignored, nothing signed;
+- a v5-shaped pool (v3) still runs exactly as before, with no v6 message;
+- the parser of a released Kilojoin (0.9.3, the same as Kilowallet 1.3.9–1.4.4), loaded from its own jar, lists v3 and v5 pools and not v6 ones (`AsyncPoolsTest` in Kilojoin).

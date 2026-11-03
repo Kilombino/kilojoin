@@ -149,5 +149,18 @@ fun main() {
             .put("fee", plan5.fee).put("txid_before_signing", CoinjoinTx.txid(plan5))
             .put("check", CoinjoinTx.checkPayment(plan5, mixB2.map { TxBuilder.Output(it, d5) }, null, d5, feeRate, listOf(1, 1),
                 listOf(pays5.size, k5), k5, pays5, 1) ?: "ok")))
+    // --- v6: asynchronous rounds. What a join binds (the terms line and its hash), and the sync MAC.
+    val creator6 = NostrEvent.pubOf(key(11))
+    val t6 = Protocol.Terms("fedcba9876543210", poolPub, amount, feeRate, 5, 1_791_400_000, "open", 1, 1_791_392_800, 2, false,
+        Protocol.V6, com.kilombino.pyblockwatch.crypto.ScriptType.P2WPKH, 1, creator6, "c5".repeat(256) + ":010001", 1, emptyList(),
+        Protocol.Async(3600, 1800, 7200, 1_791_400_000 + 3600 * 2 + 1800 * 2 + 7200))
+    val savedNet = Protocol.NETWORK; Protocol.NETWORK = "blake2b"
+    out.put("v6", JSONObject()
+        .put("announcement", t6.toJson())
+        .put("terms_line", Protocol.termsLine(t6)).put("terms_hash", Protocol.termsHash(t6))
+        .put("mac_sync", JSONObject().put("at", 1_791_395_000L).put("mac", Protocol.mac(token, "sync", 1_791_395_000L)))
+        .put("mac_vote_unchanged", JSONObject().put("vote_id", "0102030405060708").put("accept", true)
+            .put("mac", Protocol.mac(token, "vote", "0102030405060708", true))))
+    Protocol.NETWORK = savedNet
     println(out.toString(2))
 }

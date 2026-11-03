@@ -14,12 +14,13 @@ kotlin {
 
 // The wallet's own coinjoin and crypto code, from the Kilowallet submodule: one source of truth,
 // so a Kilojoin node and the app always speak the same protocol and sign the same way.
-val shared = "kilowallet/app/src/main/java/com/kilombino/pyblockwatch"
+// -PkilowalletDir=<a Kilowallet checkout> builds against another copy of it (while changing both).
+val kilowallet = (findProperty("kilowalletDir") as String?) ?: "kilowallet"
 sourceSets {
     main {
         kotlin {
             srcDir("src/main/kotlin")
-            srcDir("kilowallet/app/src/main/java")
+            srcDir("$kilowallet/app/src/main/java")
             include("com/kilombino/kilojoin/**")
             include("com/kilombino/pyblockwatch/crypto/**")
             include("com/kilombino/pyblockwatch/ark/ArkNativeStub.kt") // no Ark engine here: Kotlin signing
@@ -34,14 +35,33 @@ sourceSets {
         }
         // (src/main/resources is the default resources dir)
     }
+    test {
+        kotlin {
+            srcDir("src/test/kotlin")
+            // The app's own coinjoin tests that need nothing of Android: a local relay and the async rounds (Kilojoin v6).
+            srcDir("$kilowallet/app/src/test/java")
+            include("com/kilombino/kilojoin/**")
+            include("com/kilombino/pyblockwatch/coinjoin/TestRelay.kt")
+            include("com/kilombino/pyblockwatch/coinjoin/TestChain.kt")
+            include("com/kilombino/pyblockwatch/coinjoin/AsyncRoundsTest.kt")
+            include("com/kilombino/pyblockwatch/coinjoin/AsyncRoundsE2ETest.kt")
+        }
+    }
 }
 
 dependencies {
     implementation("org.json:json:20240303")
     testImplementation(kotlin("test"))
+    // The app's tests are JUnit 4; they run here on the JUnit Platform's vintage engine.
+    testImplementation("junit:junit:4.13.2")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.2")
 }
 
-tasks.test { useJUnitPlatform() }
+tasks.test {
+    useJUnitPlatform()
+    // The end-to-end rounds print what each wallet does: shown when a test fails.
+    testLogging { events("passed", "failed", "skipped"); exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL }
+}
 
 // One self-contained jar for the container.
 tasks.register<Jar>("fatJar") {

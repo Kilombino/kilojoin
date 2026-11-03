@@ -46,8 +46,10 @@ const noChangeAmount = (total, n, rate, t, o) => { const left = total - feeNoCha
 const v5Split = (total, k) => (k >= 2 && k <= 5 && total % k === 0 && total / k >= OUT_MIN ? [total / k, k] : [total, 1]);
 const short = (a) => esc(a.slice(0, 10)) + "…" + esc(a.slice(-6));
 // What kind of pool: a v5 payment pool, several outputs (v4), blind outputs (v3).
-const kindLine = (t) => t.v5 ? ` · a payment pool (v5): the creator pays ${(t.payments || []).length} recipient(s); you get ${sats(t.mixTotal)} in ${t.outputs > 1 ? t.outputs + " equal outputs" : "one output"}`
-  : t.outputs > 1 ? " · " + t.outputs + " outputs each (v4)" : t.version >= 3 ? " · blind outputs (v3)" : "";
+// Kilojoin v6: an asynchronous pool, and its windows in minutes.
+const asyncLine = (t) => t.async ? ` · asynchronous (v6): ${Math.round(t.async.vote / 60)} min to answer, ${Math.round(t.async.outputs / 60)} for outputs, ${Math.round(t.async.sign / 60)} to sign` : "";
+const kindLine = (t) => asyncLine(t) + (t.v5 ? ` · a payment pool (v5): the creator pays ${(t.payments || []).length} recipient(s); you get ${sats(t.mixTotal)} in ${t.outputs > 1 ? t.outputs + " equal outputs" : "one output"}`
+  : t.outputs > 1 ? " · " + t.outputs + " outputs each (v4)" : t.version >= 3 ? " · blind outputs (v3)" : "");
 // A payment pool's creator pays its recipients: no "each" about it.
 const roundTitle = (p) => p.v5 && p.creator ? `${sats(p.mixTotal)} sats to ${(p.payments || []).length} recipient(s)` : amountOf(p.amount, p.outputs) + " sats each";
 const mixTotalOf = (p) => p.mixTotal || p.amount * (p.outputs || 1);
@@ -136,10 +138,12 @@ function myPool(p, embedded) {
   if (p.phase === "OPEN") actions = (p.people >= p.minPeers ? `<button data-a="close" data-p="${p.id}">ASK TO CLOSE NOW</button> ` : "") +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
   if (p.phase === "VOTING") actions = (p.iAsked || p.voted
-    ? `<p class="muted">Waiting for the others, ${left(p.voteDeadline)} left. Whoever has not answered by then is left out; if too few are left, the pool reopens without them.</p>`
+    ? (p.v6 ? `<p class="muted">${p.voteRecorded ? "Your yes is recorded by the pool's creator." : "Your yes is sent; waiting for the creator to record it."} Waiting for the others, ${left(p.voteDeadline)} left. If someone doesn't answer, they leave the pool and the rest are asked again: it never closes with fewer people without asking.</p>`
+      : `<p class="muted">Waiting for the others, ${left(p.voteDeadline)} left. Whoever has not answered by then is left out; if too few are left, the pool reopens without them.</p>`)
     : `<p class="muted">Answer within ${left(p.voteDeadline)}.</p><button data-a="yes" data-p="${p.id}">ACCEPT</button> <button class="soft" data-a="no" data-p="${p.id}">NOT YET</button> `) +
     `<button class="soft" data-a="leave" data-p="${p.id}">${p.creator ? "END POOL" : "LEAVE"}</button>`;
-  if (p.phase === "SIGNING") actions = p.signed ? `<span class="muted">Signed. Waiting for the others (${p.sigs}/${p.planCoins} coins)…</span>` :
+  if (p.phase === "SIGNING") actions = p.reserved ? `<span class="muted">Signed, and the time to sign is over without every signature. Your coins stay reserved: the transaction can still go out if the last signatures arrive. They are free once it confirms, or once a coin of the round is spent elsewhere.</span>` :
+    p.signed ? `<span class="muted">Signed${p.v6 ? " and taken by the relay: this node can go offline, anyone with every signature broadcasts" : ""}. Waiting for the others (${p.sigs}/${p.planCoins} coins)…</span>` :
     `<p class="muted">Checked: ${p.planPeople} people (${p.planCoins} coins), ${p.v5 && p.creator ? `the others' identical outputs of ${sats(p.amount)} sats and your ${(p.payments || []).length} payment(s) exactly as announced` : `identical outputs of ${sats(p.amount)} sats, ${p.outputs > 1 ? p.outputs + " of them" : "one of them"} yours${p.v5 ? ", the creator's payments as announced" : ""}`}; ${p.change > 0 ? "your change is right" : "no change (an exact coin)"}; total fee ${sats(p.planFee)} sats.</p><button data-a="sign" data-p="${p.id}">SIGN</button>`;
   if (p.txid) actions += `<p><code>${esc(p.txid)}</code></p>`;
   if (["CONFIRMED", "ABORTED", "REJECTED"].includes(p.phase)) actions += ` <button class="ghost" data-a="remove" data-p="${p.id}">remove</button>`;
@@ -330,6 +334,8 @@ function homeScreen() {
       <div class="row"><div><label>fewest people</label><input id="c-min" value="${j.min || 2}"></div><div><label>most people</label><input id="c-max" value="${j.max || 5}"></div><div><label>open for (hours)</label><input id="c-hours" value="${j.hours || 6}"></div></div>
       <label>most coins per person (1–10)</label><input id="c-inputs" value="${j.maxInputs}">
       <p class="small">Blind outputs: when the round closes, nobody, not even you as its creator, can tell whose mixed output is whose.</p>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="c-async" style="width:auto" ${j.async ? "checked" : ""}> Asynchronous rounds (Kilojoin v6)</label>
+      <p class="faint">For people who answer at different times: up to an hour to answer, 30 minutes for the outputs and two hours to sign, with an end time no round goes past. Nobody is left out of a round without being asked again. Kilojoin runs it as the creator, so it must stay on until the round is done. Only wallets that know Kilojoin v6 see these pools.</p>
       <label>password (optional: makes it private 🔒)</label><input id="c-pw" value="${esc(j.pw || "")}">`;
     else if (j.private) h += `<label>🔒 pool password</label><input id="c-pw">`;
     if (!pay && !(j.create && j.fromCoins)) h += `<p class="faint">Each person pays ${sats(feeWithChange(j.feeRate, j.script, 1, j.outputs))} sats with change, ${sats(feeNoChange(j.feeRate, j.script, 1, j.outputs))} without, with one coin; each extra coin adds ${sats(Math.ceil(j.feeRate * inVb(j.script)))}.</p>`;
@@ -396,7 +402,8 @@ function bind() {
     for (const c of pool) { if (sum >= exact + 500) break; pick.push(c.outpoint); sum += c.value; }
     // Once it confirms, Kilojoin joins this pool (or opens the one being set up) by itself.
     const after = !joining ? null : joining.create ? { create: { amount: joining.amount, feeRate: joining.feeRate, script: joining.script, maxInputs: joining.maxInputs, outputs: joining.outputs,
-        minPeers: parseInt($("#c-min").value) || 2, maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value } }
+        minPeers: parseInt($("#c-min").value) || 2, maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value,
+        async: !!($("#c-async") && $("#c-async").checked) } }
       : { pool: joining.id, poolPassword: $("#c-pw") ? $("#c-pw").value : "" };
     joining = null; chosen = [];
     await startSend({ exact: true, type: t, address: r.address, index: r.index, after, amount: String(exact), coins: pick });
@@ -433,7 +440,7 @@ function bind() {
     else chosen = [op];
     homeScreen();
   }));
-  if (joining && joining.create) ["#c-amount", "#c-rate", "#c-type", "#c-inputs", "#c-outputs", "#c-min", "#c-max", "#c-hours", "#c-pw"].forEach((id) => { const e = $(id); if (e) e.onchange = () => {
+  if (joining && joining.create) ["#c-amount", "#c-rate", "#c-type", "#c-inputs", "#c-outputs", "#c-min", "#c-max", "#c-hours", "#c-pw", "#c-async"].forEach((id) => { const e = $(id); if (e) e.onchange = () => {
     const v = (k) => $(k) && $(k).value;
     if (v("#c-amount")) joining.amount = Math.max(OUT_MIN, Math.min(MAX, parseInt(v("#c-amount")) || MIN));
     joining.feeRate = Math.max(1, parseFloat(v("#c-rate")) || 2);
@@ -441,13 +448,15 @@ function bind() {
     joining.script = t; joining.maxInputs = Math.max(1, Math.min(10, parseInt(v("#c-inputs")) || 1));
     if (v("#c-outputs")) joining.outputs = Math.max(1, Math.min(5, parseInt(v("#c-outputs")) || 1));
     joining.min = parseInt(v("#c-min")) || 2; joining.max = parseInt(v("#c-max")) || 5; joining.hours = parseInt(v("#c-hours")) || 6; joining.pw = v("#c-pw") || "";
+    joining.async = !!($("#c-async") && $("#c-async").checked);
     if (!joining.fromCoins && !joining.pay) chosen = [];
     homeScreen(); }; });
   on("#confirm", async () => {
     try {
       if (joining.create) await api("/api/create", { coins: chosen, script: joining.script, maxInputs: joining.maxInputs, outputs: joining.outputs, amount: plan().amount, feeRate: joining.feeRate, minPeers: parseInt($("#c-min").value) || 2,
         maxPeers: parseInt($("#c-max").value) || 5, hours: parseInt($("#c-hours").value) || 6, password: $("#c-pw").value,
-        fromCoins: !!joining.fromCoins && !joining.pay, pay: joining.pay ? joining.pay.recipients : undefined, paymentPool: !!(joining.pay && joining.pay.v5) });
+        fromCoins: !!joining.fromCoins && !joining.pay, pay: joining.pay ? joining.pay.recipients : undefined, paymentPool: !!(joining.pay && joining.pay.v5),
+        async: !!($("#c-async") && $("#c-async").checked) });
       // Opening a pool ends here: its creator is already in it. Only a pool from the list is joined.
       if (joining.create) { if (joining.pay) payDraft = null; }
       else await api("/api/join", { pool: joining.id, coins: chosen, password: $("#c-pw") ? $("#c-pw").value : "" });
