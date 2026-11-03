@@ -530,7 +530,7 @@ Tested end to end on a BLAKE2b regtest node over relay.kilombino.com:
 
 ---
 
-## 14. Kilojoin v6: asynchronous rounds (unreleased; branch `kilojoin-v6` of Kilowallet and Kilojoin)
+## 14. Kilojoin v6: asynchronous rounds (Kilowallet 1.5.0, Kilojoin 0.10.0)
 
 v6 is for people who answer minutes or hours apart, mostly on phones. Each one can do their part of a stage, lock the phone and come back only when the wallet has to act again. The first to sign never has to come back: whoever holds every signature broadcasts.
 

@@ -10,11 +10,18 @@ import java.io.File
  *   KILOJOIN_PORT      web port (default 8080)
  *   BITCOIN_RPC_URL    e.g. http://bitcoind.startos:8332/
  *   BITCOIN_RPC_USER / BITCOIN_RPC_PASS, or BITCOIN_RPC_COOKIE (path to .cookie)
+ * and, for tests only: KILOJOIN_NETWORK (a test network name) and KILOJOIN_RELAY (a local relay).
  */
 fun main() {
     val env = System.getenv()
     // Tests against a regtest node use another network name, so their pools never list on mainnet.
     env["KILOJOIN_NETWORK"]?.let { com.kilombino.pyblockwatch.coinjoin.Protocol.NETWORK = it; Wallet.testnet = it != "blake2b" }
+    // And may use a relay of their own (plain ws:// is taken only on the loopback), so a test pool never
+    // reaches relay.kilombino.com at all. Only with a test network: a real node always uses the real relay.
+    env["KILOJOIN_RELAY"]?.let { r ->
+        require(com.kilombino.pyblockwatch.coinjoin.Protocol.NETWORK != "blake2b") { "KILOJOIN_RELAY needs a test KILOJOIN_NETWORK" }
+        com.kilombino.pyblockwatch.coinjoin.Protocol.RELAY = r
+    }
     val dir = File(env["KILOJOIN_DATA"] ?: "/data").apply { mkdirs() }
     val rpc = Rpc(
         env["BITCOIN_RPC_URL"] ?: "http://127.0.0.1:8332/",
