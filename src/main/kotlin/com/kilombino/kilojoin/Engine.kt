@@ -135,9 +135,10 @@ class Engine(private val dir: File, private val rpc: Rpc, private val walletProv
     fun remove(id: String) { sessions.remove(id)?.stop(); roundKeys.remove(id); persist() }
     /**
      * Coins in a live round. A round we signed stays live (Kilojoin v6) past its deadlines until its
-     * transaction confirms or one of its coins is spent elsewhere: its coins stay here.
+     * transaction confirms or one of its coins is spent elsewhere: its coins stay here. A round sent but not seen
+     * (its broadcast failed, or it was reorged out) holds them too, every version, until it confirms 6 deep or is given up.
      */
-    fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done && it.state.phase != PoolSession.Phase.BROADCAST }
+    fun lockedOutpoints(): Set<String> = sessions.values.filter { !it.done }
         .flatMap { s -> s.state.seat.coins.map { it.outpoint } }.toSet()
 
     // ------------------------------------------------------------------ joining

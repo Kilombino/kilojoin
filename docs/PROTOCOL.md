@@ -139,9 +139,17 @@ CLOSING (5 min + 60 s grace): every member posts its output after a random delay
    outputs == round size ─► SIGNING;  more outputs than people ─► abort
 SIGNING (20 min + 60 s grace): each member checks the plan, signs its input, posts `sig`
    all sigs ─► anyone assembles and broadcasts, posts `tx`
-BROADCAST ─► CONFIRMED at 1 confirmation
+BROADCAST ─► CONFIRMED at 6 confirmations (Kilowallet 1.5.1, Kilojoin 0.10.1; 1 before)
 pool timeout while open ─► aborted ("the pool expired")
 ```
+
+**After broadcast (local rules, every version since Kilowallet 1.5.1 and Kilojoin 0.10.1).** No message changes; these are what a wallet does on its own once it holds every signature or has seen the round's `tx`, the same as v6 (§14, "Reserved inputs after signing"):
+
+- a failed broadcast does not abort the round (a node out of reach, a full mempool, or a spend of one of its coins that may still be replaced or reorged away): the round stays sent-pending, its coins reserved, and goes again every couple of minutes; `tx` is posted once a node takes it;
+- a transaction not seen is never given up for time alone (before 1.5.1: after 12 hours): only a coin of the round spent by another transaction **6 blocks deep** frees the round's coins; meanwhile a wallet with every signature broadcasts it again;
+- the round counts as **confirmed at 6 confirmations**; if its txid disappears after being seen (a reorg, an eviction) it is followed and sent again as above.
+
+A round whose wallet has not signed yet keeps its deadlines (an `abort`, or the signing time running out, ends it as before).
 
 What the creator checks on a join:
 
@@ -645,7 +653,7 @@ Once a wallet has signed all its inputs, **no deadline, no `final`, no `abort` f
 - the planned txid shows up (mempool or block): the round went out, as if it had broadcast it itself; or
 - a coin of the round is spent by another transaction **6 blocks deep**: the round can never confirm, and the coins are free. A spend in the mempool, or less deep, may still be replaced, evicted or reorged away: the round stays reserved meanwhile, and if its txid shows up it is followed.
 
-The wallet looks every couple of minutes. A signature may still arrive meanwhile; whoever then holds them all broadcasts. To free its coins earlier, a member spends one of them and waits 6 blocks (that cancels the round for everyone, as it should). After broadcasting, v6 gives up a transaction only when one of its coins is spent elsewhere 6 deep (no 12-hour limit); while it is not seen, a wallet with every signature broadcasts it again.
+The wallet looks every couple of minutes. A signature may still arrive meanwhile; whoever then holds them all broadcasts. To free its coins earlier, a member spends one of them and waits 6 blocks (that cancels the round for everyone, as it should). After broadcasting, v6 gives up a transaction only when one of its coins is spent elsewhere 6 deep (no 12-hour limit); while it is not seen, a wallet with every signature broadcasts it again. Since Kilowallet 1.5.1 and Kilojoin 0.10.1 rounds of v1–v5 pools follow the same rules after broadcast (§3).
 
 A round counts as **confirmed at 6 confirmations** of its txid. If the txid disappears after being seen (a reorg, an eviction), the round is back to sent-and-unseen: as above, it goes again from every wallet that holds every signature.
 
@@ -706,4 +714,5 @@ Three wallets in one process (an always-on creator and two members) on a relay i
 - the creator restarted from disk during the vote (a yes arriving while it was down), during the outputs and during signing;
 - a forged `closing` (and a snapshot carrying it) for a member that never said yes: ignored, nothing signed;
 - a v5-shaped pool (v3) still runs exactly as before, with no v6 message;
+- after broadcast, the rules of §3 in pools before v6 (chain in memory): in a v3 pool a coin spent elsewhere in the mempool before the last signature makes every broadcast fail and the round stays (13 hours and 5 blocks of that spend later too), freed at 6; in a v3 pool every broadcast refused for 13 hours with the coins unspent: sent again, never freed, posted once taken, confirmed at 6; in a v5 payment pool the round one block deep then reorged out: confirmed 1/6, sent again, confirmed at 6;
 - the parser of a released Kilojoin (0.9.3, the same as Kilowallet 1.3.9–1.4.4), loaded from its own jar, lists v3 and v5 pools and not v6 ones (`AsyncPoolsTest` in Kilojoin).

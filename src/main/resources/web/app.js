@@ -118,6 +118,12 @@ function unlockScreen() {
   $("#go").onclick = go; $("#pw").onkeydown = (e) => { if (e.key === "Enter") go(); };
 }
 
+// A round sent: not taken by a node yet (it goes again), or its confirmations until the 6 it counts as confirmed at.
+function sentText(p, waiting) {
+  if ((p.reason || "").startsWith("not sent yet")) return "Signed · not sent yet, it goes again";
+  return p.confs > 0 ? `Sent · confirmed ${p.confs}/6` : waiting;
+}
+
 function phaseText(p) {
   switch (p.phase) {
     case "JOINING": return "Asking to join…";
@@ -125,7 +131,7 @@ function phaseText(p) {
     case "VOTING": return `Close now with ${p.people} people?`;
     case "CLOSING": return `Closing with ${p.people} people · collecting outputs`;
     case "SIGNING": return `Ready: sign within ${left(p.phaseDeadline)}`;
-    case "BROADCAST": return "Sent · waiting for the first confirmation";
+    case "BROADCAST": return sentText(p, "Sent · waiting for the first confirmation");
     case "CONFIRMED": return "Confirmed ✅";
     case "ABORTED": return "Cancelled: " + p.reason + (p.pay ? ". Nothing was paid: send it normally if you like." : ". Your coin did not move.");
     case "REJECTED": return "Refused: " + p.reason;
@@ -555,7 +561,7 @@ function roundCard(p) {
     VOTING: needs ? `Closing vote · your answer, by ${hhmm(p.voteDeadline)}` : `Closing vote · ${p.people} people`,
     CLOSING: `Closing · ${p.people} people · collecting outputs`,
     SIGNING: p.signed ? "Signed · waiting for the others" : needs ? "Ready to sign" : "Signing",
-    BROADCAST: "Sent · waiting for a block", CONFIRMED: "Confirmed", ABORTED: "Cancelled", REJECTED: "Refused",
+    BROADCAST: sentText(p, "Sent · waiting for a block"), CONFIRMED: "Confirmed", ABORTED: "Cancelled", REJECTED: "Refused",
   }[p.phase] || p.phase;
   // A payment through the pool: its outputs are the recipients', never this wallet's.
   const pay = p.pay;
