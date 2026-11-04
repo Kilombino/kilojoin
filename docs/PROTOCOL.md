@@ -632,7 +632,7 @@ SIGNING (window `sign`, ≤ final): sign, send, anyone with every signature broa
                      a wallet that signed stays, its coins RESERVED (below)
 ```
 
-1. **Never a smaller round without asking.** v5 closes a timed-out vote with the yes-voters only, and closes a round again without seats that went silent. v6 does neither: the round is always the whole roster the vote was over, every seat of it having said yes to that very vote. A roster change ends the vote; a new vote over the new roster asks everyone again (an earlier yes does not carry over). The creator opens such a new vote by itself only after a timeout, only if it said yes itself, at most 5 times in a pool, and not when the outputs window would no longer fit before `final`.
+1. **Never a smaller round without asking.** v5 closes a timed-out vote with the yes-voters only, and closes a round again without seats that went silent. v6 does neither: the round is always the whole roster the vote was over, every seat of it having said yes to that very vote. A roster change ends the vote; a new vote over the new roster asks everyone again (an earlier yes does not carry over). The creator opens such a new vote by itself only after a timeout, only if it said yes itself, at most 5 times in a pool, and only if a whole round still fits: now + `vote` + `outputs` + `sign` ≤ `final` (the default `final` leaves room for one).
 2. **Decline, withdraw, timeout are explicit**, in `reopen`'s `outcome`, and every member applies them the same way.
 3. **Missing history never authorizes signing.** A member takes a `closing` only for the vote under way, over exactly the roster it holds for that vote's `seq`, and only if *it* answered yes to that `vote_id` (its own record, kept on its disk). A wallet that lost its history, or is shown a round it never agreed to, does not take part. Signing still needs the creator's `outputs` and the checks of v5.
 4. **Blind signatures are given once per seat for the pool's life.** A round called off and voted again reuses them (the member hands the same outputs in again); a seat never gets a second set.
@@ -643,9 +643,13 @@ SIGNING (window `sign`, ≤ final): sign, send, anyone with every signature broa
 Once a wallet has signed all its inputs, **no deadline, no `final`, no `abort` frees its coins**: another member may hold every signature and broadcast later. The round stays in signing, reserved, until it resolves on the chain:
 
 - the planned txid shows up (mempool or block): the round went out, as if it had broadcast it itself; or
-- a coin of the round is spent by any other transaction: it can never confirm, and the coins are free.
+- a coin of the round is spent by another transaction **6 blocks deep**: the round can never confirm, and the coins are free. A spend in the mempool, or less deep, may still be replaced, evicted or reorged away: the round stays reserved meanwhile, and if its txid shows up it is followed.
 
-The wallet looks every couple of minutes. A signature may still arrive meanwhile; whoever then holds them all broadcasts. To free its coins earlier, a member spends one of them (that cancels the round for everyone, as it should). After broadcasting, v6 gives up a transaction only when one of its coins is spent elsewhere (no 12-hour limit); while it is not seen and its coins are unspent, a wallet with every signature broadcasts it again.
+The wallet looks every couple of minutes. A signature may still arrive meanwhile; whoever then holds them all broadcasts. To free its coins earlier, a member spends one of them and waits 6 blocks (that cancels the round for everyone, as it should). After broadcasting, v6 gives up a transaction only when one of its coins is spent elsewhere 6 deep (no 12-hour limit); while it is not seen, a wallet with every signature broadcasts it again.
+
+A round counts as **confirmed at 6 confirmations** of its txid. If the txid disappears after being seen (a reorg, an eviction), the round is back to sent-and-unseen: as above, it goes again from every wallet that holds every signature.
+
+These are local rules: the messages and their fields are the same, and wallets that apply the earlier ones (Kilowallet 1.5.0, Kilojoin 0.10.0) keep interoperating.
 
 ### Snapshot (`state`)
 
@@ -677,7 +681,7 @@ As in v5, plus:
 
 ### Limits
 
-- **Relay retention:** a pool's channel must stay on the relay until its last round resolves (at least `final` plus a day). The snapshot keeps a returning wallet going even if older events are gone, but a member that never got its own blind signatures can't hand its outputs in from a snapshot alone.
+- **Relay retention:** a pool's channel must stay on the relay until its last round resolves (at least `final` plus a day). The snapshot keeps a returning wallet going even if older events are gone, but a member that never got its own blind signatures can't hand its outputs in from a snapshot alone. A reserved round can outlast any retention (relay.kilombino.com keeps kind 2023 and 32022 events 7 days), so while a wallet is reserved it posts its own `sig` messages again every 24 h (the same messages, counted once), and a reserved creator its `state` with every signature it holds. Whoever comes back finds them, and whoever then holds every signature broadcasts.
 - **History:** wallets subscribe without `limit`. A relay that caps a REQ (relay.kilombino.com: 500 events) may cut a long pool's history; the snapshot covers what a wallet needs to go on.
 - **Events:** a vote costs a `vote` and a `vote_ack` per seat (more with repeats), plus snapshots: well within relay.kilombino.com's 20 000 kind-2023 events per pubkey a day.
 - **Time:** wallets compare deadlines with their own clock; a phone far off may act late or early by that much.
@@ -694,7 +698,10 @@ Three wallets in one process (an always-on creator and two members) on a relay i
 - lost acknowledgments: a lost `vote_ack` (and lost snapshots), a lost output, a lost OK for a signature: each sent again and counted once;
 - every event delivered twice and replays shuffled, a duplicate vote injected, a member restarted mid-vote;
 - a vote that expires with a silent member: a new vote over the new roster, no round until the others answer again; the silent one comes back out of the pool;
-- the signing window and `final` pass with one signature missing: the signers stay reserved; then a coin is spent elsewhere and they are free; and a lost signature sent again hours later still completes a reserved round;
+- the signing window and `final` pass with one signature missing: the signers stay reserved; then a coin is spent elsewhere, in the mempool and up to 5 blocks deep they stay reserved, at 6 they are free; and a lost signature sent again hours later still completes a reserved round;
+- the round one block deep, then reorged out and gone from the mempool: not confirmed, sent again, confirmed at 6;
+- a vote that times out near the end: a new vote only while vote + outputs + sign still fit before `final`;
+- a reserved round past a week on a relay that drops events older than 7 days: the daily reposts let a member that comes back hold every signature and broadcast;
 - a roster change during a vote (a member leaves): the vote ends, no round of the rest, a late yes is `superseded`;
 - the creator restarted from disk during the vote (a yes arriving while it was down), during the outputs and during signing;
 - a forged `closing` (and a snapshot carrying it) for a member that never said yes: ignored, nothing signed;
