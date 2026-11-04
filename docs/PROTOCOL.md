@@ -566,7 +566,7 @@ A wallet that only knows v5 would join an asynchronous pool and run it with its 
 | `final` | unix time no stage of the pool goes past | `timeout` < `final` ≤ `timeout` + 86 400 |
 
 - The lower bounds are v5's fixed windows: a v6 pool is never shorter than v5.
-- `timeout` keeps its meaning: until then the pool is open (people join, anyone may ask to close). A vote under way at `timeout` runs to its own deadline; a new vote that replaces one (below) may start until `final`.
+- `timeout` keeps its meaning: until then the pool is open (people join, anyone may ask to close). A vote under way at `timeout` runs to its own deadline; a new vote that replaces one (below) may start until `final`. So a member never ends a pool at `timeout` by itself: open again after a vote that ended, it waits until `final` for the creator's new vote or its `abort` (it may come a moment after the `reopen`; Kilowallet 1.5.2, Kilojoin 0.10.2: before, a member could leave at `timeout` in that moment).
 - No deadline is ever later than `final`. A missing participant can't extend it.
 - Kilojoin and Kilowallet open asynchronous pools with the longest windows and `final` = `timeout` + 2 × `vote` + 2 × `outputs` + `sign` (room for one vote that times out, a second vote, and a full round).
 - A wallet lists a v6 pool only if every field is in range, as for v5 (and `payments`, when not empty, as in v5).
